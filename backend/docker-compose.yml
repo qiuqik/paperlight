@@ -1,0 +1,29 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      GROBID_URL: http://grobid:8070
+      PAPERLIGHT_DATA_DIR: /data/documents
+      PAPERLIGHT_CORS_ORIGINS: ${PAPERLIGHT_CORS_ORIGINS:-http://localhost:8765,http://127.0.0.1:8765}
+      HF_HOME: /models/huggingface
+    volumes:
+      - ./storage:/data
+      - docling-model-cache:/models
+    depends_on:
+      - grobid
+    restart: unless-stopped
+  grobid:
+    image: grobid/grobid:0.9.1-full
+    platform: linux/amd64
+    ports:
+      - "127.0.0.1:8070:8070"
+    ulimits:
+      core: 0
+    restart: unless-stopped
+
+volumes:
+  docling-model-cache:

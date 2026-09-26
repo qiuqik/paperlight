@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+backend/.venv/
+backend/storage/
+papers/
+架构规划说明.txt
+.env
+*.log
