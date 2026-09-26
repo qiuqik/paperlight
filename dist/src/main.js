@@ -165,7 +165,8 @@ $('#fontSize').addEventListener('input',event=>document.documentElement.style.se
 $('#contentWidth').addEventListener('change',event=>document.documentElement.style.setProperty('--reading-width',event.target.value));
 const apiInput=$('#parserApiUrl');
 const isLocalHost=['localhost','127.0.0.1'].includes(location.hostname);
-try{apiInput.value=localStorage.getItem('paperlight-parser-api')||(isLocalHost?'http://127.0.0.1:8000':'');}catch{apiInput.value=isLocalHost?'http://127.0.0.1:8000':'';}
+const defaultApiUrl=isLocalHost?'http://127.0.0.1:8000':location.hostname.endsWith('.ts.net')?`https://${location.hostname}:8443`:'';
+try{apiInput.value=localStorage.getItem('paperlight-parser-api')||defaultApiUrl;}catch{apiInput.value=defaultApiUrl;}
 apiInput.addEventListener('change',()=>{const value=apiInput.value.trim().replace(/\/+$/,'');try{if(value)localStorage.setItem('paperlight-parser-api',value);else localStorage.removeItem('paperlight-parser-api');}catch{}apiInput.value=value;});
 $('#themeButton').addEventListener('click',()=>{darkMode=!darkMode;document.documentElement.style.setProperty('--paper',darkMode?'#202b29':'#fffdfa');document.documentElement.style.setProperty('--ink',darkMode?'#e8f0ed':'#172522');document.documentElement.style.setProperty('--wash',darkMode?'#273532':'#f4f8f6');document.documentElement.style.setProperty('--line',darkMode?'#40504c':'#dfe8e4');document.documentElement.style.setProperty('--muted',darkMode?'#a9bab5':'#6c7d79');document.body.style.background=darkMode?'#15201e':'#edf3f0';document.querySelectorAll('.reading p').forEach(p=>p.style.color=darkMode?'#d3dfdb':'#293c37');});
 $('#tocToggle').addEventListener('click',()=>$('#leftRail').classList.toggle('mobile-open'));

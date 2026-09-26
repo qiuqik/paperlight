@@ -30,7 +30,7 @@ curl.exe http://127.0.0.1:8000/health
 
 默认 API 只监听 Windows 本机的 `127.0.0.1:8000`，GROBID 只在容器网络内供 API 使用。要改 Windows 端口，在 `backend/.env` 中修改 `PAPERLIGHT_API_PORT`；要让其他机器直连，才将 `PAPERLIGHT_BIND_HOST` 改为 `0.0.0.0`，并配置防火墙及访问保护。`PAPERLIGHT_CORS_ORIGINS` 填浏览器网页的来源地址，多个用逗号分隔。修改 `.env` 后执行 `docker compose up -d --force-recreate`。
 
-第一次启动会下载 Docling 模型与 GROBID 镜像，需要较长时间和数 GB 磁盘空间。健康检查中的 `doclingAvailable` 应为 `true`。API 文档位于 `http://127.0.0.1:8000/docs`（改端口后同步替换）。日志可用 `docker compose logs -f api` 查看；停止服务用 `docker compose down`，不会删除已解析的文件。
+第一次启动会下载 Docling 模型与 GROBID 镜像，需要较长时间和数 GB 磁盘空间。Docker 配置使用 CPU 版 PyTorch 和 GROBID CRF 镜像；CRF 版镜像较小，但部分引用和元数据识别准确率低于 GROBID full 版。健康检查中的 `doclingAvailable` 应为 `true`。API 文档位于 `http://127.0.0.1:8000/docs`（改端口后同步替换）。日志可用 `docker compose logs -f api` 查看；停止服务用 `docker compose down`，不会删除已解析的文件。
 
 如果希望直接在 Windows 上运行 Python，不使用 Docker，请参照 [后端说明](backend/README.md#run-without-docker-on-windows)。此时 GROBID 可选；未启动时仍会尝试从 PDF 文本恢复编号参考文献。
 

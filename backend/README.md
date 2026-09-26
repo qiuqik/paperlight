@@ -20,7 +20,7 @@ Edit `backend/.env` to set:
 | `PAPERLIGHT_API_PORT` | `8000` | Port on the Windows host. The API's container port remains `8000`. |
 | `PAPERLIGHT_CORS_ORIGINS` | `http://localhost:8765,http://127.0.0.1:8765` | Comma-separated browser origins allowed to call the API. Add the exact HTTPS reader origin when using the published website. |
 
-After changing `.env`, run `docker compose up -d --force-recreate`. The API is at `http://127.0.0.1:<PAPERLIGHT_API_PORT>` and interactive docs are at `/docs`. GROBID stays inside the Compose network and has no published host port. Source PDFs and parsed assets persist in `backend/storage/`; Docling models persist in a Docker volume. First startup downloads models and the large GROBID image and may take some time. Use `docker compose logs -f api` to inspect errors and `docker compose down` to stop.
+After changing `.env`, run `docker compose up -d --force-recreate`. The API is at `http://127.0.0.1:<PAPERLIGHT_API_PORT>` and interactive docs are at `/docs`. GROBID stays inside the Compose network and has no published host port. Source PDFs and parsed assets persist in `backend/storage/`; Docling models persist in a Docker volume. The Docker image installs CPU-only PyTorch and torchvision, and Compose uses GROBID's smaller CPU/CRF image. CRF uses less disk and memory than the full image, with some loss of citation and metadata extraction accuracy. First startup downloads the Docling models and GROBID image and may take some time. Use `docker compose logs -f api` to inspect errors and `docker compose down` to stop.
 
 ## Run without Docker on Windows
 
