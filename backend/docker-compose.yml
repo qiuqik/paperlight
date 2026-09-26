@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "127.0.0.1:8000:8000"
+      - "${PAPERLIGHT_BIND_HOST:-127.0.0.1}:${PAPERLIGHT_API_PORT:-8000}:8000"
     environment:
       GROBID_URL: http://grobid:8070
       PAPERLIGHT_DATA_DIR: /data/documents
@@ -19,8 +19,6 @@ services:
   grobid:
     image: grobid/grobid:0.9.1-full
     platform: linux/amd64
-    ports:
-      - "127.0.0.1:8070:8070"
     ulimits:
       core: 0
     restart: unless-stopped
