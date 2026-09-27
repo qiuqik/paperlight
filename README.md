@@ -22,7 +22,9 @@ npm run dev
 docker compose up --build -d
 ```
 
-仅对外提供网页端口 `127.0.0.1:8040`；需要让其他设备访问时，在根目录的 `.env` 中设置 `PAPERLIGHT_WEB_BIND=0.0.0.0`，并在外层配置 HTTPS 与访问保护。解析服务和 GROBID 只在 Compose 内部网络通信。数据保存在 `userdata/`，解析快照保存在 `result/`。
+网页默认只监听本机的 `127.0.0.1:8040`。如果不使用 Tailscale 等本机 HTTPS 转发，而要直接从其他设备连接端口，可在根目录的 `.env` 中设置 `PAPERLIGHT_WEB_BIND=0.0.0.0`，并在外层配置 HTTPS 与访问保护。解析服务和 GROBID 只在 Compose 内部网络通信。数据保存在 `userdata/`，解析快照保存在 `result/`。
+
+如果其他设备已加入同一个 Tailscale 私网，可保持网页只监听 `127.0.0.1:8040`，在 Windows 主机上运行 `tailscale serve --bg --https 443 http://127.0.0.1:8040`。Mac 直接打开 Tailscale 给出的 `https://<主机名>.<tailnet>.ts.net/`；浏览器的文档请求由 Next.js 在容器内部转发到 parser，无需另行暴露 parser 或 GROBID。当前 `desktop-c0d40qs.tailc57931.ts.net` 的首页已经按此方式转发。开发时可用本机 `npm run dev` 提供 8040；长期运行建议关闭开发服务，改由根目录的 Compose 提供同一端口，Tailscale 地址不需要改变。Windows 主机睡眠、Docker Desktop 停止或 Tailscale 断开时，远程页面也会不可用。
 
 新版交互包括顶部工具模式、选中文字后直接高亮或下划线、选中后立即创建并聚焦笔记、图表区域标记、左右面板、专注模式、预设或自定义主题及排版设置。批注与文档缓存在当前浏览器的 IndexedDB，排版偏好在当前浏览器持续保存；服务器文档与批注通过 Parser API 同步。各浏览器和来源地址的本地历史互不相通，旧版 `8765` 网页的浏览器数据不会自动出现在新版 `8040` 网页中。
 
