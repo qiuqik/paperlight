@@ -1084,6 +1084,25 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
 
     _place_figures_before_intro(sections, figures, intro_heading_box)
 
+    abstract_page: int | None = None
+    abstract_bbox: dict[str, float] | None = None
+    if abstract:
+        target = "".join(char for char in abstract.casefold() if char.isalnum())[:256]
+        best_score = 0.0
+        for candidate in getattr(docling_doc, "texts", []) or []:
+            provenance = getattr(candidate, "prov", None) or []
+            if not provenance or not getattr(provenance[0], "bbox", None):
+                continue
+            candidate_text = "".join(char for char in clean_text(getattr(candidate, "text", "")).casefold() if char.isalnum())[:256]
+            if not candidate_text:
+                continue
+            score = SequenceMatcher(None, target, candidate_text, autojunk=False).ratio()
+            if score > best_score:
+                best_score = score
+                if score >= 0.8:
+                    abstract_page = int(provenance[0].page_no)
+                    abstract_bbox = _block_bbox(provenance[0], pdf_document)
+
     for text_page in text_pages.values():
         text_page.close()
     if pdf_document:
@@ -1094,7 +1113,7 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
         if abstract_section:
             compact_abstract = re.sub(r"\W+", "", abstract.casefold())
             overflow = [block for block in abstract_section.blocks if block.type != "paragraph" or not re.sub(r"\W+", "", block.text.casefold()) in compact_abstract]
-            abstract_section.blocks = [Block(id="abstract-1", type="paragraph", text=abstract, content=[InlineNode(type="text", text=abstract)])]
+            abstract_section.blocks = [Block(id="abstract-1", type="paragraph", text=abstract, content=[InlineNode(type="text", text=abstract)], page=abstract_page, bbox=abstract_bbox)]
             first_body = next((section for section in sections if section.type == "body" and _heading_key(section.title) == "introduction"), None)
             if first_body is None:
                 first_body = next((section for section in sections if section.type == "body"), None)
@@ -1112,11 +1131,11 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
                     content=_numbered_citations(prose, references)))
 
     if abstract and not any(section.type == "abstract" for section in sections):
-        sections.insert(0, Section(id="abstract", title="Abstract", level=1, type="abstract", blocks=[Block(id="abstract-1", type="paragraph", text=abstract, content=[InlineNode(type="text", text=abstract)])]))
+        sections.insert(0, Section(id="abstract", title="Abstract", level=1, type="abstract", blocks=[Block(id="abstract-1", type="paragraph", text=abstract, content=[InlineNode(type="text", text=abstract)], page=abstract_page, bbox=abstract_bbox)]))
     elif abstract:
         for section in sections:
             if section.type == "abstract" and not section.blocks:
-                section.blocks.append(Block(id="abstract-1", type="paragraph", text=abstract, content=[InlineNode(type="text", text=abstract)]))
+                section.blocks.append(Block(id="abstract-1", type="paragraph", text=abstract, content=[InlineNode(type="text", text=abstract)], page=abstract_page, bbox=abstract_bbox))
 
     synthetic_intro = next((section for section in sections if section.id == "introduction" and section.type == "body"), None)
     if synthetic_intro:
