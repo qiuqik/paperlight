@@ -74,7 +74,8 @@ def _check_compatibility(old: dict, new: dict, annotations: list[dict]) -> None:
 def upgrade(folder: Path, backup_root: Path | None) -> dict:
     path = folder / "document.json"
     old = json.loads(path.read_text(encoding="utf-8"))
-    if old.get("modelVersion") == DOCUMENT_MODEL_VERSION:
+    old_blocks = _blocks(old)
+    if old.get("modelVersion") == DOCUMENT_MODEL_VERSION and all(block.get("bbox") for block in old_blocks.values()):
         return {"id": folder.name[:8], "status": "current"}
     if not (folder / "original.pdf").is_file() or not (folder / "docling.json").is_file():
         raise ValueError("Missing original PDF or Docling snapshot")
@@ -125,11 +126,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--backup-dir", type=Path, help="Apply upgrades and save original files here")
+    parser.add_argument("--id", action="append", default=[], help="Process only this document ID or unique prefix")
     args = parser.parse_args()
     if args.backup_dir and args.backup_dir.resolve().is_relative_to(args.data_dir.resolve()):
         parser.error("Backup directory must be outside the document data directory")
     for folder in sorted(args.data_dir.iterdir()):
         if not folder.is_dir() or len(folder.name) != 32 or not (folder / "document.json").is_file():
+            continue
+        if args.id and not any(folder.name.startswith(prefix) for prefix in args.id):
             continue
         try:
             print(json.dumps(upgrade(folder, args.backup_dir)))

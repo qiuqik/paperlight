@@ -790,7 +790,7 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
     in_index_terms = False
     in_publication_citation = False
     in_article_info = False
-    deferred_first_page_prose: list[str] = []
+    deferred_first_page_prose: list[tuple[str, dict[str, float] | None]] = []
 
     for item, _depth in docling_doc.iterate_items():
         label = getattr(getattr(item, "label", None), "value", str(getattr(item, "label", ""))).lower()
@@ -825,7 +825,7 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             # the first body paragraph. Keep the prose after the institution.
             tail = re.split(r"\b(?=In this paper,|We present |This paper )", text, maxsplit=1)
             if len(tail) > 1:
-                deferred_first_page_prose.append(tail[1])
+                deferred_first_page_prose.append((tail[1], _block_bbox(location, pdf_document)))
             continue
         above_abstract = has_abstract_heading and location is not None and getattr(location, "bbox", None) and _page_no(item) == 1 and float(location.bbox.b) >= abstract_heading_bottom - 2
         if above_abstract and not seen_abstract_heading and title and label in {"text", "list_item", "footnote"}:
@@ -1161,9 +1161,9 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
         first_body = next((section for section in sections if section.type == "body"), None)
         if first_body:
             insert_at = next((i for i, block in enumerate(first_body.blocks) if (block.page or 1) > 1), len(first_body.blocks))
-            for offset, prose in enumerate(deferred_first_page_prose):
+            for offset, (prose, bbox) in enumerate(deferred_first_page_prose):
                 first_body.blocks.insert(insert_at + offset, Block(
-                    id=f"frontmatter-prose-{offset+1}", type="paragraph", text=prose, page=1,
+                    id=f"frontmatter-prose-{offset+1}", type="paragraph", text=prose, page=1, bbox=bbox,
                     content=_numbered_citations(prose, references)))
 
     if abstract and not any(section.type == "abstract" for section in sections):
