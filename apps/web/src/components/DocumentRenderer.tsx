@@ -46,15 +46,15 @@ function AreaMarks({block, annotations, pages}: {block: Block; annotations: Anno
 function BlockView({block, annotations, pages}: {block: Block; annotations: Annotation[]; pages: PageGeometry[]}) {
   const common = {'data-block-id': block.id, 'data-page': block.page};
   switch (block.type) {
-    case 'paragraph': return <p {...common}>{block.src ? <><img className="formula-crop" src={block.src} alt="原 PDF 段落" /><span className="sr-only">{block.text}</span></> : block.content?.length ? <Inline nodes={block.content} /> : <PlainText text={block.text || ''} />}</p>;
+    case 'paragraph': return <p {...common} className="area-target">{block.src ? <><img className="formula-crop" src={block.src} alt="原 PDF 段落" /><span className="sr-only">{block.text}</span></> : block.content?.length ? <Inline nodes={block.content} /> : <PlainText text={block.text || ''} />}<AreaMarks block={block} annotations={annotations} pages={pages} /></p>;
     case 'figure': return <figure {...common} id={block.id} className="paper-figure area-target" onDragStart={event => event.preventDefault()}>{block.src && <img src={block.src} alt={block.caption || block.label || '论文插图'} draggable={false} />}<AreaMarks block={block} annotations={annotations} pages={pages} /><figcaption><strong>{block.label || `Figure ${block.number}`}</strong> {block.caption}</figcaption></figure>;
     case 'table': return <figure {...common} id={block.id} className="paper-figure area-target" onDragStart={event => event.preventDefault()}><figcaption><strong>{block.label || `Table ${block.number}`}</strong> {block.caption}</figcaption>{block.src ? <img src={block.src} alt={block.caption || '论文表格'} draggable={false} /> : <div className="table-scroll"><table><thead><tr>{(block.headers || []).map((cell, index) => <th key={index}>{typeof cell === 'string' ? cell : cell.text}</th>)}</tr></thead><tbody>{(block.rows || []).map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex}>{typeof cell === 'string' ? cell : cell.text}</td>)}</tr>)}</tbody></table></div>}<AreaMarks block={block} annotations={annotations} pages={pages} /></figure>;
     case 'equation': return <figure {...common} className={`paper-equation area-target${block.number != null ? ' numbered-equation' : ''}`} onDragStart={event => event.preventDefault()}>{block.src ? <img src={block.src} alt={block.text || '原 PDF 公式'} draggable={false} /> : <code>{block.text}</code>}{block.number != null && <span className="equation-number" aria-label={`公式编号 ${block.number}`}>({block.number})</span>}<AreaMarks block={block} annotations={annotations} pages={pages} /></figure>;
-    case 'list': return <ul {...common}>{(block.items || []).map((item, index) => <li key={index}>{item}</li>)}</ul>;
-    case 'quote': return <blockquote {...common}>{block.text}</blockquote>;
-    case 'code': return block.src ? <figure {...common}><img src={block.src} alt={block.text || '代码'} /></figure> : <pre {...common}>{block.text}</pre>;
-    case 'footnote': return <aside {...common} className="footnote">{block.text}</aside>;
-    default: return <p {...common}>{block.text}</p>;
+    case 'list': return <div {...common} className="area-target"><ul>{(block.items || []).map((item, index) => <li key={index}>{item}</li>)}</ul><AreaMarks block={block} annotations={annotations} pages={pages} /></div>;
+    case 'quote': return <blockquote {...common} className="area-target">{block.text}<AreaMarks block={block} annotations={annotations} pages={pages} /></blockquote>;
+    case 'code': return block.src ? <figure {...common} className="area-target"><img src={block.src} alt={block.text || '代码'} /><AreaMarks block={block} annotations={annotations} pages={pages} /></figure> : <pre {...common} className="area-target">{block.text}<AreaMarks block={block} annotations={annotations} pages={pages} /></pre>;
+    case 'footnote': return <aside {...common} className="footnote area-target">{block.text}<AreaMarks block={block} annotations={annotations} pages={pages} /></aside>;
+    default: return <p {...common} className="area-target">{block.text}<AreaMarks block={block} annotations={annotations} pages={pages} /></p>;
   }
 }
 
