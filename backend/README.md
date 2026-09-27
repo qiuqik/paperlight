@@ -72,3 +72,7 @@ GROBID header and citation consolidation are enabled to enrich DOI, publication,
 When GROBID is unreachable or returns no bibliography, the API uses PDFium's text layer to recover numbered references and link numeric in-text callouts. This fallback preserves citation navigation but may omit venue, DOI, or other bibliographic fields.
 
 The current Tailscale reader uses the same-origin Next.js proxy, so remote browsers only connect to the Web address. Do not expose the parser or GROBID ports for this setup.
+
+## Legacy document models
+
+Models saved before `modelVersion` 3 may have no PDF geometry. `backend/scripts/upgrade_legacy_models.py` rebuilds a model from each document's saved `docling.json` and original PDF without running Docling again. It runs as a dry run unless `--backup-dir` is supplied. The upgrade keeps the document ID and refuses changes to existing block IDs, block text, or text order, protecting saved annotation anchors. With `--backup-dir`, it saves the original `document.json` and any overwritten assets before replacing a compatible model. Documents that fail compatibility checks remain unchanged and require individual review.
