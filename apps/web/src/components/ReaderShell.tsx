@@ -223,11 +223,11 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
 
   const addAnnotation = useCallback(async (record: Annotation) => {
     setAnnotations(current => [...current, record]);
+    if (record.type === 'note') {setLayout({rightPanel: 'notes', rightOpen: true}); setNoteFocusId(record.id);}
     try {await saveAnnotation(record);} catch {setImportStatus('批注未能保存到浏览器');}
     if (serverId) {
       try {const response = await fetch(`/api/parser/api/documents/${serverId}/annotations`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(record)}); if (!response.ok) setImportStatus('批注仅保存在此浏览器，服务器同步失败');} catch {setImportStatus('批注仅保存在此浏览器，服务器同步失败');}
     }
-    if (record.type === 'note') {setLayout({rightPanel: 'notes', rightOpen: true}); setNoteFocusId(record.id);}
   }, [serverId, setLayout]);
 
   const syncNote = (annotationId: string, note: string, remote: string) => {
