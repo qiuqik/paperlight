@@ -1000,13 +1000,17 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             else:
                 pending_tables.append(block)
             continue
-        if not text:
+        # A displayed formula can have no extractable glyphs. Its PDF geometry
+        # is still enough to retain a faithful crop in the document model.
+        if not text and label not in {"formula", "display_formula"}:
             continue
         if label in {"formula", "display_formula"}:
             equation_id = f"equation-{len(sections)}-{len(current.blocks) if current else 0}"
             asset_path = document_dir / "assets" / f"{equation_id}.png"
             asset_path.parent.mkdir(parents=True, exist_ok=True)
             equation_src = f"/api/documents/{document_id}/assets/{asset_path.name}" if _render_picture_from_pdf(document_dir / "original.pdf", item, asset_path, margin=2) else None
+            if not text and not equation_src:
+                continue
             block = Block(id=equation_id, type="equation", text=text, page=_page_no(item), src=equation_src)
         elif label == "code":
             code_id = f"code-{len(sections)}-{len(current.blocks) if current else 0}"
