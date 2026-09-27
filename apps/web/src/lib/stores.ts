@@ -7,12 +7,12 @@ export type Dock = 'top' | 'bottom' | 'left' | 'right';
 export type RightPanel = 'references' | 'figures' | 'tables' | 'notes';
 type Theme = 'paper' | 'warm' | 'dark' | 'custom';
 type Preferences = {
-  fontFamily: string; fontSize: number; lineHeight: number; contentWidth: number; theme: Theme; toolbarDock: Dock; activeColor: string;
+  fontFamily: string; fontSize: number; lineHeight: number; contentWidth: number; theme: Theme; toolbarDock: Dock; activeColor: string; cachePdf: boolean;
   customApp: string; customPaper: string; customText: string; customAccent: string;
   set: (values: Partial<Omit<Preferences, 'set'>>) => void;
 };
 export const usePreferences = create<Preferences>()(persist(set => ({
-  fontFamily: 'Georgia, serif', fontSize: 18, lineHeight: 1.72, contentWidth: 800, theme: 'paper', toolbarDock: 'top', activeColor: '#f8d86a',
+  fontFamily: 'Georgia, serif', fontSize: 18, lineHeight: 1.72, contentWidth: 800, theme: 'paper', toolbarDock: 'top', activeColor: '#f8d86a', cachePdf: false,
   customApp: '#e9f0eb', customPaper: '#ffffff', customText: '#26352f', customAccent: '#366f5e',
   set: values => set(values),
 }), {name: 'paperlight-v2-preferences', storage: createJSONStorage(() => localStorage), skipHydration: true}));
