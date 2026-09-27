@@ -1,5 +1,6 @@
 import type {Annotation, TextAnchor} from './document';
 import {isTextAnchor} from './document';
+import {contextAt, contextOffsets, findQuoteOffsets, normalizeQuote} from './quoteAnchor';
 
 function blockFor(node: Node | null, root: HTMLElement): HTMLElement | null {
   const element = node instanceof Element ? node : node?.parentElement;
@@ -45,16 +46,47 @@ function pointAtOffset(block: HTMLElement, offset: number): {node: Node; offset:
   return null;
 }
 
-export function resolveAnchor(root: HTMLElement, anchor: TextAnchor): Range | null {
-  const startBlock = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.dataset.blockId === anchor.start.blockId);
-  const endBlock = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.dataset.blockId === anchor.end.blockId);
-  if (!startBlock || !endBlock) return null;
-  const start = pointAtOffset(startBlock, anchor.start.offset);
-  const end = pointAtOffset(endBlock, anchor.end.offset);
+function rangeAt(startBlock: HTMLElement, startOffset: number, endBlock: HTMLElement, endOffset: number): Range | null {
+  const start = pointAtOffset(startBlock, startOffset);
+  const end = pointAtOffset(endBlock, endOffset);
   if (!start || !end) return null;
   const range = document.createRange();
   try {range.setStart(start.node, start.offset); range.setEnd(end.node, end.offset);} catch {return null;}
   return range;
+}
+
+function sameQuote(range: Range, quote: string): boolean {
+  return normalizeQuote(range.toString()) === normalizeQuote(quote);
+}
+
+export function resolveAnchor(root: HTMLElement, anchor: TextAnchor): Range | null {
+  const startBlock = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.dataset.blockId === anchor.start.blockId);
+  const endBlock = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.dataset.blockId === anchor.end.blockId);
+  if (!startBlock || !endBlock) return null;
+  const startText = startBlock.textContent || '';
+  const endText = endBlock.textContent || '';
+  const original = rangeAt(startBlock, anchor.start.offset, endBlock, anchor.end.offset);
+  if (original && (!anchor.quote || sameQuote(original, anchor.quote))
+    && contextAt(startText, anchor.start.offset, anchor.prefix, 'before')
+    && contextAt(endText, anchor.end.offset, anchor.suffix, 'after')) return original;
+  if (!anchor.quote) return null;
+
+  if (startBlock === endBlock) {
+    const match = findQuoteOffsets(startText, anchor.quote, anchor.prefix, anchor.suffix);
+    if (match) {
+      const recovered = rangeAt(startBlock, match.start, endBlock, match.end);
+      if (recovered && sameQuote(recovered, anchor.quote)) return recovered;
+    }
+  }
+
+  const starts = anchor.prefix ? contextOffsets(startText, anchor.prefix, 'before', anchor.start.offset) : [0];
+  const ends = anchor.suffix ? contextOffsets(endText, anchor.suffix, 'after', anchor.end.offset) : [endText.length];
+  const recovered: Range[] = [];
+  for (const start of starts) for (const end of ends) {
+    const range = rangeAt(startBlock, start, endBlock, end);
+    if (range && sameQuote(range, anchor.quote)) recovered.push(range);
+  }
+  return recovered.length === 1 ? recovered[0] : null;
 }
 
 type HighlightRegistry = {set: (key: string, value: unknown) => void; delete: (key: string) => void};
