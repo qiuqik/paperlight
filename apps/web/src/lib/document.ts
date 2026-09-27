@@ -13,7 +13,7 @@ export type DocumentModel = {
   id: string; modelVersion?: number; fingerprint?: string; metadata: {title: string; authors: string[]; pageCount: number; readMinutes?: number; venue?: string; year?: number};
   sections: Section[]; references: Reference[]; figures: Block[]; tables: Block[]; pages?: PageGeometry[];
 };
-export const DOCUMENT_MODEL_VERSION = 2;
+export const DOCUMENT_MODEL_VERSION = 3;
 export type TextAnchor = {start: {blockId: string; offset: number}; end: {blockId: string; offset: number}; quote: string; prefix: string; suffix: string};
 export type AreaAnchor = {blockId: string; page: number; bbox: Box; space?: 'page' | 'block'};
 export type Annotation = {id: string; documentId: string; type: 'highlight' | 'underline' | 'note' | 'area'; color: string; anchor: TextAnchor | AreaAnchor; note?: string; createdAt: number};

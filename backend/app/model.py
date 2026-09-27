@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-DOCUMENT_MODEL_VERSION = 2
+DOCUMENT_MODEL_VERSION = 3
 
 
 class InlineNode(BaseModel):

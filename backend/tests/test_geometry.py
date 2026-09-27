@@ -9,7 +9,7 @@ from types import ModuleType
 from unittest.mock import patch
 
 from backend.app.model import Block, Section
-from backend.app.normalizer import _block_bbox, _heading_key, _place_figures_before_intro, _repair_heading, _reposition_figures, extract_pdf_references, normalize_docling
+from backend.app.normalizer import _block_bbox, _formula_number, _heading_key, _place_figures_before_intro, _repair_heading, _reposition_figures, extract_pdf_references, normalize_docling
 
 
 class GeometryTests(unittest.TestCase):
@@ -17,6 +17,15 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(_repair_heading("1Introduction"), "1 Introduction")
         self.assertEqual(_repair_heading("2RELATED WORK"), "2 RELATED WORK")
         self.assertEqual(_heading_key("1Introduction"), _heading_key("Introduction"))
+
+    def test_equation_number_requires_one_nearby_pdf_number(self) -> None:
+        location = SimpleNamespace(page_no=3, bbox=SimpleNamespace(
+            l=86, b=309, r=271, t=334, coord_origin="BOTTOMLEFT"))
+        page = SimpleNamespace(get_size=lambda: (565, 771),
+                               get_textpage=lambda: SimpleNamespace(get_text_bounded=lambda **kwargs: "formula (1)", close=lambda: None))
+        self.assertEqual(_formula_number(location, [None, None, page]), 1)
+        page.get_textpage = lambda: SimpleNamespace(get_text_bounded=lambda **kwargs: "(1) and (2)", close=lambda: None)
+        self.assertIsNone(_formula_number(location, [None, None, page]))
 
     def test_repeated_bibliography_numbers_and_appendix_are_excluded(self) -> None:
         page_text = ("REFERENCES\n[1] A. Author. A useful paper. 2020.\n"

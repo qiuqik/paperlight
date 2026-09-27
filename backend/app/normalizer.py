@@ -265,6 +265,32 @@ def _block_bbox(location: Any, pdf_document: Any) -> dict[str, float] | None:
         return None
 
 
+def _formula_number(location: Any, pdf_document: Any) -> int | None:
+    """Read an equation number only when one appears beside its PDF box."""
+    if location is None or not getattr(location, "bbox", None) or pdf_document is None:
+        return None
+    try:
+        page = pdf_document[int(location.page_no) - 1]
+        width, height = page.get_size()
+        box = location.bbox
+        left, right = sorted((float(box.l), float(box.r)))
+        bottom, top = sorted((float(box.b), float(box.t)))
+        if str(box.coord_origin).lower().endswith("topleft"):
+            bottom, top = height - top, height - bottom
+        column_edge = width / 2 if right < width / 2 else width
+        text_page = page.get_textpage()
+        try:
+            nearby = text_page.get_text_bounded(
+                left=max(left, column_edge - 70), bottom=max(0, bottom - 5),
+                right=column_edge, top=min(height, top + 5))
+        finally:
+            text_page.close()
+        matches = re.findall(r"\((\d{1,3})\)", nearby)
+        return int(matches[0]) if len(matches) == 1 else None
+    except (IndexError, OSError, TypeError, ValueError):
+        return None
+
+
 def _place_figures_before_intro(sections: list[Section], figures: list[Block], heading: tuple[int, float] | None) -> None:
     if not heading:
         return
@@ -1035,7 +1061,8 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             equation_src = f"/api/documents/{document_id}/assets/{asset_path.name}" if _render_picture_from_pdf(document_dir / "original.pdf", item, asset_path, margin=2) else None
             if not text and not equation_src:
                 continue
-            block = Block(id=equation_id, type="equation", text=text, page=_page_no(item), src=equation_src)
+            block = Block(id=equation_id, type="equation", text=text, page=_page_no(item), src=equation_src,
+                          number=_formula_number(location, pdf_document))
         elif label == "code":
             code_id = f"code-{len(sections)}-{len(current.blocks) if current else 0}"
             asset_path = document_dir / "assets" / f"{code_id}.png"
