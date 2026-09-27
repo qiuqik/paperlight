@@ -80,6 +80,28 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(appendix.blocks[0].text, "Additional results.")
         self.assertTrue(appendix.blocks[1].src.endswith(".png"))
 
+    def test_synthetic_abstract_keeps_source_page_and_bbox(self) -> None:
+        abstract_text = "This paper explains the result."
+        source = SimpleNamespace(label=SimpleNamespace(value="text"), text=abstract_text,
+                                 prov=[SimpleNamespace(page_no=1, bbox=object())])
+        doc = SimpleNamespace(iterate_items=lambda: iter(()), texts=[source], pictures=[], pages={1: None})
+        core = ModuleType("docling_core")
+        core.__path__ = []
+        types = ModuleType("docling_core.types")
+        types.__path__ = []
+        doc_types = ModuleType("docling_core.types.doc")
+        doc_types.PictureItem = type("PictureItem", (), {})
+        doc_types.TableItem = type("TableItem", (), {})
+        box = {"x": 20, "y": 40, "width": 200, "height": 30}
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(sys.modules, {
+            "docling_core": core, "docling_core.types": types, "docling_core.types.doc": doc_types,
+        }), patch("backend.app.normalizer._block_bbox", return_value=box):
+            model = normalize_docling(doc, "abc", Path(temp_dir), grobid={"abstract": abstract_text})
+
+        abstract = next(section for section in model.sections if section.type == "abstract")
+        self.assertEqual(abstract.blocks[0].page, 1)
+        self.assertEqual(abstract.blocks[0].bbox, box)
+
 
 if __name__ == "__main__":
     unittest.main()
