@@ -115,9 +115,22 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   }, [paper, localId]);
 
   const openDocument = useCallback(async (document: DocumentModel, id: string, remote?: string) => {
-    setPaper(resolveAssetSources(document, remote)); setLocalId(id); setServerId(remote);
+    const documentKey = document.fingerprint && /^[a-f0-9]{64}$/.test(document.fingerprint) ? document.fingerprint : id;
     let saved: Annotation[] = [];
-    try {saved = await listAnnotations(id);} catch {}
+    try {saved = await listAnnotations(documentKey);} catch {}
+    if (documentKey !== id) {
+      try {
+        const legacy = await listAnnotations(id);
+        const savedIds = new Set(saved.map(item => item.id));
+        for (const item of legacy) if (!savedIds.has(item.id)) await saveAnnotation({...item, documentId: documentKey});
+        saved = [...new Map([...legacy, ...saved].map(item => [item.id, {...item, documentId: documentKey}])).values()];
+        const [currentProgress, legacyProgress] = await Promise.all([getProgress(documentKey), getProgress(id)]);
+        if (legacyProgress && (!currentProgress || legacyProgress.updatedAt > currentProgress.updatedAt)) {
+          await saveProgress({...legacyProgress, id: documentKey});
+        }
+      } catch {}
+    }
+    setProgress(0); setPaper(resolveAssetSources(document, remote)); setLocalId(documentKey); setServerId(remote);
     if (remote) {
       try {
         const response = await fetch(`/api/parser/api/documents/${remote}/annotations`);
@@ -127,12 +140,12 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
             const anchor = {start: {blockId: item.blockId || '', offset: item.start || 0}, end: {blockId: item.blockId || '', offset: item.end || 0}, quote: item.quote || '', prefix: '', suffix: ''};
             return {...item, type: item.note ? 'note' : item.mode === 'underline' ? 'underline' : 'highlight', anchor} as Annotation;
           });
-          for (const item of remoteAnnotations) if (item.anchor) {await saveAnnotation({...item, documentId: id});}
-          saved = [...new Map([...saved, ...remoteAnnotations.filter(item => item.anchor)].map(item => [item.id, {...item, documentId: id}])).values()];
+          for (const item of remoteAnnotations) if (item.anchor) {await saveAnnotation({...item, documentId: documentKey});}
+          saved = [...new Map([...saved, ...remoteAnnotations.filter(item => item.anchor)].map(item => [item.id, {...item, documentId: documentKey}])).values()];
         }
       } catch {}
     }
-    setAnnotations(saved); setProgress(0); setLayout({historyOpen: false});
+    setAnnotations(saved); setLayout({historyOpen: false});
     try {history.replaceState({}, '', id === SAMPLE.id ? '/' : `/reader/${encodeURIComponent(id)}`);} catch {}
   }, [setLayout]);
 
