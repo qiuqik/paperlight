@@ -20,10 +20,15 @@ const TOOLS: Array<{id: Tool; label: string; Icon: typeof Highlighter}> = [
 type ParserState = {documentId: string; status: string; stage?: string; progress?: number; document?: DocumentModel; error?: string};
 type ServerRecord = {documentId: string; title: string; pageCount: number; status: string};
 type LibraryRecord = {id: string; name: string; folder: string; size: number};
+const PARSE_STAGE_LABELS: Record<string, string> = {
+  queued: '等待解析', loading_parser: '准备解析器', extracting_structure: '提取正文结构',
+  recognizing_scanned_pages: '识别扫描页面', linking_references: '关联参考文献',
+  normalizing_document: '整理图表与公式', ready: '解析完成', failed: '解析失败',
+};
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function waitForDocument(state: ParserState, onProgress: (message: string) => void): Promise<ParserState & {document: DocumentModel}> {
   for (let tries = 0; tries < 360 && state.status === 'processing'; tries++) {
-    onProgress(`正在解析：${state.stage || '等待中'} · ${Math.round((state.progress || 0) * 100)}%`);
+    onProgress(`${PARSE_STAGE_LABELS[state.stage || ''] || '正在解析'} · ${Math.round((state.progress || 0) * 100)}%`);
     await pause(2000);
     const response = await fetch(`/api/parser/api/documents/${state.documentId}`);
     if (!response.ok) throw new Error(`状态查询失败 (${response.status})`);

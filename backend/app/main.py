@@ -154,6 +154,8 @@ def put_preferences(profile_id: str, preferences: dict[str, Any]) -> dict[str, A
     return value
 
 
+@app.post("/api/documents/import", response_model=ProcessingStatus, status_code=202)
+@app.post("/parser/jobs", response_model=ProcessingStatus, status_code=202)
 @app.post("/api/documents", response_model=ProcessingStatus, status_code=202)
 async def create_document(background_tasks: BackgroundTasks, file: UploadFile = File(...)) -> ProcessingStatus:
     filename = Path(file.filename or "paper.pdf").name
@@ -393,6 +395,30 @@ def delete_annotation(document_id: str, annotation_id: str) -> None:
         temporary.replace(folder / "annotations.json")
 
 
+def _annotation_document_id(annotation_id: str) -> str:
+    if not re.fullmatch(r"[a-f0-9-]{32,36}", annotation_id) or not DATA_DIR.is_dir():
+        raise HTTPException(status_code=404, detail="Annotation not found.")
+    matches = [folder.name for folder in DATA_DIR.iterdir()
+               if folder.is_dir() and re.fullmatch(r"[a-f0-9]{32}", folder.name)
+               and any(item.get("id") == annotation_id for item in _read_annotations(folder))]
+    if not matches:
+        raise HTTPException(status_code=404, detail="Annotation not found.")
+    if len(matches) > 1:
+        raise HTTPException(status_code=409, detail="Annotation ID is ambiguous.")
+    return matches[0]
+
+
+@app.patch("/api/annotations/{annotation_id}")
+def update_annotation_by_id(annotation_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+    return update_annotation(_annotation_document_id(annotation_id), annotation_id, changes)
+
+
+@app.delete("/api/annotations/{annotation_id}", status_code=204)
+def delete_annotation_by_id(annotation_id: str) -> None:
+    delete_annotation(_annotation_document_id(annotation_id), annotation_id)
+
+
+@app.get("/parser/jobs/{document_id}", response_model=ProcessingStatus)
 @app.get("/api/documents/{document_id}", response_model=ProcessingStatus)
 def get_document(document_id: str) -> ProcessingStatus:
     state = _get_job(document_id)
@@ -405,6 +431,42 @@ def get_document(document_id: str) -> ProcessingStatus:
         except (OSError, json.JSONDecodeError):
             state.update(status="failed", error="Processed document data could not be read.")
     return ProcessingStatus(**state)
+
+
+@app.get("/api/documents/{document_id}/model", response_model=DocumentModel)
+def get_document_model(document_id: str) -> DocumentModel:
+    state = get_document(document_id)
+    if state.status != "ready" or state.document is None:
+        raise HTTPException(status_code=409, detail=state.error or "Document is not ready.")
+    return state.document
+
+
+@app.delete("/api/documents/{document_id}", status_code=204)
+def delete_document(document_id: str) -> None:
+    if not re.fullmatch(r"[a-f0-9]{32}", document_id):
+        raise HTTPException(status_code=404, detail="Document not found.")
+    folder = DATA_DIR / document_id
+    if folder.is_symlink() or folder.resolve().parent != DATA_DIR.resolve():
+        raise HTTPException(status_code=404, detail="Document not found.")
+    with import_lock:
+        state = _get_job(document_id)
+        if state is None or not folder.is_dir():
+            raise HTTPException(status_code=404, detail="Document not found.")
+        if state.get("status") == "processing":
+            raise HTTPException(status_code=409, detail="Cannot delete a document while it is processing.")
+        try:
+            if RESULT_DIR is not None:
+                result_folder = RESULT_DIR / document_id
+                if result_folder.is_symlink() or result_folder.resolve().parent != RESULT_DIR.resolve():
+                    raise HTTPException(status_code=500, detail="Result folder is unsafe to delete.")
+                if result_folder.is_dir():
+                    shutil.rmtree(result_folder)
+            shutil.rmtree(folder)
+        except OSError as exc:
+            logger.exception("Could not delete document %s", document_id)
+            raise HTTPException(status_code=500, detail="Document could not be deleted.") from exc
+        with jobs_lock:
+            jobs.pop(document_id, None)
 
 
 @app.get("/api/documents/{document_id}/assets/{asset_name}")
@@ -483,4 +545,5 @@ def _process_document(document_id: str, filename: str) -> None:
     finally:
         if executor:
             executor.shutdown(wait=False, cancel_futures=True)
-        _save_result(document_id)
+        with import_lock:
+            _save_result(document_id)

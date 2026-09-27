@@ -57,13 +57,49 @@ class AnnotationApiTests(unittest.TestCase):
         old = {"blockId": "p1", "quote": "first", "start": 0, "end": 5, "mode": "highlight", "color": "#f8d86a"}
         self.assertEqual(self.client.post(f"/api/documents/{self.document_id}/annotations", json=old).status_code, 201)
 
+    def test_document_api_exposes_model_job_and_safe_delete(self) -> None:
+        folder = main.DATA_DIR / self.document_id
+        (folder / "status.json").write_text(json.dumps({"documentId": self.document_id, "status": "ready", "stage": "ready"}), encoding="utf-8")
+        (folder / "document.json").write_text(json.dumps({"id": self.document_id, "metadata": {"title": "Test paper"}, "sections": []}), encoding="utf-8")
+        old_result_dir = main.RESULT_DIR
+        main.RESULT_DIR = main.DATA_DIR / "results"
+        result_folder = main.RESULT_DIR / self.document_id
+        result_folder.mkdir(parents=True)
+        (result_folder / "snapshot.json").write_text("{}", encoding="utf-8")
+        try:
+            self.assertEqual(self.client.get(f"/parser/jobs/{self.document_id}").json()["status"], "ready")
+            model = self.client.get(f"/api/documents/{self.document_id}/model")
+            self.assertEqual(model.status_code, 200)
+            self.assertEqual(model.json()["metadata"]["title"], "Test paper")
+            self.assertEqual(self.client.delete(f"/api/documents/{self.document_id}").status_code, 204)
+            self.assertEqual(self.client.get(f"/api/documents/{self.document_id}").status_code, 404)
+            self.assertFalse(result_folder.exists())
+        finally:
+            main.RESULT_DIR = old_result_dir
+
+    def test_processing_document_keeps_files_until_ready(self) -> None:
+        folder = main.DATA_DIR / self.document_id
+        (folder / "status.json").write_text(json.dumps({"documentId": self.document_id, "status": "processing"}), encoding="utf-8")
+        self.assertEqual(self.client.get(f"/api/documents/{self.document_id}/model").status_code, 409)
+        self.assertEqual(self.client.delete(f"/api/documents/{self.document_id}").status_code, 409)
+        self.assertTrue(folder.is_dir())
+
+    def test_annotation_id_routes_update_and_delete(self) -> None:
+        note = {"type": "note", "color": "#ef7474", "anchor": {"start": {"blockId": "p1", "offset": 0},
+                "end": {"blockId": "p1", "offset": 5}, "quote": "first"}}
+        created = self.client.post(f"/api/documents/{self.document_id}/annotations", json=note)
+        annotation_id = created.json()["id"]
+        self.assertEqual(self.client.patch(f"/api/annotations/{annotation_id}", json={"note": "Remember this"}).json()["note"], "Remember this")
+        self.assertEqual(self.client.delete(f"/api/annotations/{annotation_id}").status_code, 204)
+        self.assertEqual(self.client.get(f"/api/documents/{self.document_id}/annotations").json(), [])
+
     def test_same_pdf_reuses_processing_document(self) -> None:
         old_process = main._process_document
         main._process_document = lambda document_id, filename: None
         try:
             payload = b"%PDF-1.4\nexample"
-            first = self.client.post("/api/documents", files={"file": ("paper.pdf", payload, "application/pdf")})
-            second = self.client.post("/api/documents", files={"file": ("renamed.pdf", payload, "application/pdf")})
+            first = self.client.post("/api/documents/import", files={"file": ("paper.pdf", payload, "application/pdf")})
+            second = self.client.post("/parser/jobs", files={"file": ("renamed.pdf", payload, "application/pdf")})
             self.assertEqual(first.status_code, 202)
             self.assertEqual(second.status_code, 202)
             self.assertEqual(first.json()["documentId"], second.json()["documentId"])

@@ -6,7 +6,9 @@ type Context = {params: Promise<{path: string[]}>};
 
 async function proxy(request: NextRequest, {params}: Context) {
   const {path} = await params;
-  if (!path.length || path[0] !== 'api' || !['documents', 'library'].includes(path[1])) return new Response('Not found', {status: 404});
+  const allowed = (path[0] === 'api' && ['documents', 'library', 'annotations'].includes(path[1]))
+    || (path[0] === 'parser' && path[1] === 'jobs');
+  if (!allowed) return new Response('Not found', {status: 404});
   const target = `${parserBase.replace(/\/$/, '')}/${path.map(encodeURIComponent).join('/')}${request.nextUrl.search}`;
   try {
     const headers = new Headers();

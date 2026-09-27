@@ -36,8 +36,10 @@ Use a different installed Python version in the first command if needed. Docling
 
 ## API
 
-- `POST /api/documents` — multipart field `file`, returns a processing document ID.
-- `GET /api/documents/{id}` — processing stage or the normalized document JSON.
+- `POST /api/documents/import` (also `/api/documents` and `/parser/jobs`) — multipart field `file`, returns a processing document ID.
+- `GET /api/documents/{id}` (also `/parser/jobs/{id}`) — processing stage or the normalized document JSON.
+- `GET /api/documents/{id}/model` — the normalized document; returns 409 until parsing succeeds.
+- `DELETE /api/documents/{id}` — removes a finished document and its debug snapshot; returns 409 while parsing is active.
 - `GET /api/documents` — saved document history.
 - `GET /api/library` — PDFs under the configured server library root.
 - `POST /api/library/{id}/open` — import a library PDF by its opaque ID; arbitrary paths are not accepted.
@@ -45,6 +47,7 @@ Use a different installed Python version in the first command if needed. Docling
 - `POST /api/documents/{id}/annotations` — create a highlight or note.
 - `PATCH /api/documents/{id}/annotations/{annotation_id}` — edit a note.
 - `DELETE /api/documents/{id}/annotations/{annotation_id}` — remove one.
+- `PATCH /api/annotations/{annotation_id}` and `DELETE /api/annotations/{annotation_id}` — document-independent annotation routes.
 - `GET /api/documents/{id}/assets/{name}` — extracted figure image.
 - `GET /health` — parser availability and GROBID endpoint.
 
