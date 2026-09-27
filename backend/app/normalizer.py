@@ -432,6 +432,21 @@ def _reposition_figures(sections: list[Section], geometry: dict[str, tuple[int, 
         anchor_index = target_section.blocks.index(anchor)
         target_section.blocks.insert(anchor_index if before else anchor_index + 1, figure)
 
+    # Several figures can choose the same paragraph. Repeated insertion after
+    # that paragraph reverses them, so restore their order from PDF positions.
+    for section in sections:
+        index = 0
+        while index < len(section.blocks):
+            if section.blocks[index].type != "figure" or section.blocks[index].id not in figure_boxes:
+                index += 1
+                continue
+            end = index + 1
+            while end < len(section.blocks) and section.blocks[end].type == "figure" and section.blocks[end].id in figure_boxes:
+                end += 1
+            section.blocks[index:end] = sorted(section.blocks[index:end], key=lambda block: (
+                figure_boxes[block.id][0], -figure_boxes[block.id][4], figure_boxes[block.id][1]))
+            index = end
+
 
 def _heading_level(text: str) -> int:
     roman = re.match(r"^([IVXLCDM]+)\.\s+(.+)$", text)

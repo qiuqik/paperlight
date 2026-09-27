@@ -40,6 +40,18 @@ class GeometryTests(unittest.TestCase):
 
         self.assertEqual([block.id for block in section.blocks], ["p1", "figure-1", "p2"])
 
+    def test_figures_sharing_anchor_keep_pdf_order(self) -> None:
+        paragraph = Block(id="p1", type="paragraph", page=2)
+        upper = Block(id="upper", type="figure", page=2)
+        lower = Block(id="lower", type="figure", page=2)
+        section = Section(id="results", title="Results", blocks=[paragraph, upper, lower])
+        geometry = {"p1": (2, (10, 600, 250, 700))}
+        figure_boxes = {"upper": (2, 10, 480, 250, 560), "lower": (2, 10, 380, 250, 460)}
+
+        _reposition_figures([section], geometry, figure_boxes)
+
+        self.assertEqual([block.id for block in section.blocks], ["p1", "upper", "lower"])
+
     def test_appendix_after_references_and_unreadable_formula_are_retained(self) -> None:
         def item(label: str, text: str, page: int):
             return SimpleNamespace(label=SimpleNamespace(value=label), text=text,
