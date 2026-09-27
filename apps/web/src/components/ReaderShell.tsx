@@ -4,7 +4,7 @@ import {BookOpen, ChevronLeft, ChevronRight, Clock3, FilePlus2, Highlighter, Ima
 import DocumentRenderer from './DocumentRenderer';
 import demo from '@/data/demo.json';
 import type {Annotation, AreaAnchor, DocumentModel} from '@/lib/document';
-import {allBlocks, isTextAnchor, resolveAssetSources} from '@/lib/document';
+import {allBlocks, DOCUMENT_MODEL_VERSION, isTextAnchor, resolveAssetSources} from '@/lib/document';
 import {captureAnchor, renderTextHighlights, resolveAnchor} from '@/lib/anchors';
 import {deleteAnnotation, fingerprint, getDocument, listAnnotations, listDocuments, saveAnnotation, saveDocument, type SavedDocument} from '@/lib/storage';
 import {useAnnotationUI, useLayout, usePreferences, type RightPanel, type Tool} from '@/lib/stores';
@@ -199,7 +199,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     try {
       const hash = await fingerprint(file);
       const cached = await getDocument(hash);
-      if (cached) {await openDocument(cached.document, hash, cached.serverId); setImportStatus(''); return;}
+      if (cached?.document.modelVersion === DOCUMENT_MODEL_VERSION) {await openDocument(cached.document, hash, cached.serverId); setImportStatus(''); return;}
       const body = new FormData(); body.set('file', file);
       setImportStatus('正在上传 PDF…');
       const response = await fetch('/api/parser/api/documents', {method: 'POST', body});

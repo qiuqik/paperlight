@@ -1,6 +1,7 @@
 """Contract checks for both legacy and canonical annotation payloads."""
 
 import json
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -66,6 +67,22 @@ class AnnotationApiTests(unittest.TestCase):
             self.assertEqual(first.status_code, 202)
             self.assertEqual(second.status_code, 202)
             self.assertEqual(first.json()["documentId"], second.json()["documentId"])
+        finally:
+            main._process_document = old_process
+
+    def test_old_model_cache_is_reparsed_on_import(self) -> None:
+        payload = b"%PDF-1.4\nlegacy model"
+        fingerprint = hashlib.sha256(payload).hexdigest()
+        folder = main.DATA_DIR / self.document_id
+        (folder / "status.json").write_text(json.dumps({"status": "ready", "documentId": self.document_id,
+                                                         "fingerprint": fingerprint}), encoding="utf-8")
+        old_process = main._process_document
+        main._process_document = lambda document_id, filename: None
+        try:
+            response = self.client.post("/api/documents", files={"file": ("paper.pdf", payload, "application/pdf")})
+            self.assertEqual(response.status_code, 202)
+            self.assertNotEqual(response.json()["documentId"], self.document_id)
+            self.assertEqual(response.json()["status"], "processing")
         finally:
             main._process_document = old_process
 

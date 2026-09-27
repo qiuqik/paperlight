@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+DOCUMENT_MODEL_VERSION = 2
+
 
 class InlineNode(BaseModel):
     type: Literal["text", "citation", "link", "inlineEquation", "superscript", "subscript", "figureLink", "tableLink"]
@@ -78,6 +80,7 @@ class Metadata(BaseModel):
 
 class DocumentModel(BaseModel):
     id: str
+    modelVersion: int = DOCUMENT_MODEL_VERSION
     fingerprint: str = ""
     status: Literal["ready"] = "ready"
     metadata: Metadata

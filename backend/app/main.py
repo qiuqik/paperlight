@@ -21,7 +21,7 @@ from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from .model import DocumentModel, ProcessingStatus
+from .model import DOCUMENT_MODEL_VERSION, DocumentModel, ProcessingStatus
 from .normalizer import extract_pdf_references, normalize_docling, parse_grobid
 
 APP_DIR = Path(__file__).resolve().parents[1]
@@ -191,7 +191,10 @@ async def create_document(background_tasks: BackgroundTasks, file: UploadFile = 
                 existing_document = existing / "document.json"
                 if status["status"] == "ready":
                     try:
-                        status["document"] = json.loads(existing_document.read_text(encoding="utf-8"))
+                        document = json.loads(existing_document.read_text(encoding="utf-8"))
+                        if document.get("modelVersion") != DOCUMENT_MODEL_VERSION:
+                            continue
+                        status["document"] = document
                     except (OSError, ValueError):
                         continue
                 shutil.rmtree(folder, ignore_errors=True)
