@@ -1,5 +1,35 @@
 # Paperlight · 结构化论文阅读器
 
+## v2 阅读器
+
+新版阅读器位于 `apps/web/`，使用 Next.js、React 和 TypeScript。它读取现有 Python Parser API 返回的 Document Model；文档先解析为 JSON，再按段落、图片、表格和公式等块渲染。旧静态网页仍保留在 `index.html` 和 `dist/`，用于兼容已有部署。
+
+本机开发先启动解析服务，再启动阅读器：
+
+```powershell
+cd backend
+docker compose up --build -d
+cd ..
+npm install
+npm run dev
+```
+
+新版网页地址为 `http://127.0.0.1:8040`。示例论文无需解析服务即可阅读；导入 PDF、服务器历史与跨设备批注需要解析服务。解析服务地址默认 `http://127.0.0.1:8000`，可通过 `PAPERLIGHT_PARSER_URL` 指定。浏览器只访问同源的 `/api/parser`，由 Next.js 转发到内部解析服务。
+
+若要用单个 Docker Compose 启动新版网页、解析服务和 GROBID，在项目根目录运行：
+
+```powershell
+docker compose up --build -d
+```
+
+仅对外提供网页端口 `127.0.0.1:8040`；需要让其他设备访问时，在根目录的 `.env` 中设置 `PAPERLIGHT_WEB_BIND=0.0.0.0`，并在外层配置 HTTPS 与访问保护。解析服务和 GROBID 只在 Compose 内部网络通信。数据保存在 `userdata/`，解析快照保存在 `result/`。
+
+新版交互包括顶部工具模式、选中文字后直接高亮或下划线、选中后立即创建并聚焦笔记、图表区域标记、左右面板、专注模式、主题和排版设置。批注与文档缓存在当前浏览器的 IndexedDB，排版偏好在当前浏览器持续保存；服务器文档与批注通过 Parser API 同步。各浏览器和来源地址的本地历史互不相通，旧版 `8765` 网页的浏览器数据不会自动出现在新版 `8040` 网页中。
+
+当前解析仍由 Docling 与 GROBID 完成。新版会保存 PDF 块的页码、边界框和最终阅读顺序；公式识别不可靠时使用原 PDF 裁图。更完整的列检测和语义解析仍需后续数据集验证。
+
+## 旧版静态网页
+
 Paperlight 把论文 PDF 转成适合连续阅读的网页：左侧章节目录、中间正文与图表、右侧参考文献。读者可以点击正文中的引用和图表编号跳转，并调整字号与阅读宽度。
 
 项目提供两种解析路径：
@@ -15,7 +45,8 @@ Paperlight 把论文 PDF 转成适合连续阅读的网页：左侧章节目录�
 | `dist/` | 可直接托管的静态网页 |
 | `backend/app/` | FastAPI 与文档标准化逻辑 |
 | `backend/docker-compose.yml`, `backend/.env.example` | API 与 GROBID 容器配置及端口示例 |
-| `backend/storage/` | 运行时 PDF、JSON、图像；不提交到 Git |
+| `userdata/documents/` | 上传的 PDF、解析结果、图像和笔记；不提交到 Git |
+| `result/` | 解析调试快照与批量测试报告；不提交到 Git |
 
 ## 先在 Windows 本机运行
 
@@ -34,13 +65,30 @@ curl.exe http://127.0.0.1:8000/health
 
 如果希望直接在 Windows 上运行 Python，不使用 Docker，请参照 [后端说明](backend/README.md#run-without-docker-on-windows)。此时 GROBID 可选；未启动时仍会尝试从 PDF 文本恢复编号参考文献。
 
-在另一个 PowerShell 窗口，从项目根目录启动本地网页：
+推荐在项目根目录安装登录后自动运行的后台任务。它会启动 Docker Desktop、API/GROBID 和网页；关闭 PowerShell 或 Codex 后仍持续运行，异常退出后由 Windows 任务计划程序重启。需要登录 Windows 用户账号才能在重启后自动启动。
 
 ```powershell
-py -m http.server 8765
+.\scripts\install-background.ps1
 ```
 
-打开 `http://127.0.0.1:8765`，导入有文字层的 PDF。网页会自动尝试本机 `http://127.0.0.1:8000`；页面不再提示“服务器解析不可用”且显示 Docling/GROBID 结果，表示前后端已连接。也可以在「Aa 阅读设置 → Parser API URL」手动填写 API 地址。
+需要临时前台运行网页时，也可在另一个 PowerShell 窗口执行：
+
+```powershell
+py -m http.server 8765 --bind 127.0.0.1 --directory dist
+```
+
+打开 `http://127.0.0.1:8765`，导入 PDF。网页会自动尝试本机 `http://127.0.0.1:8000`。解析完成的论文保存在 `userdata/documents/`，可从「历史记录」重新打开；选中正文可高亮或添加笔记，笔记保存在同一目录。也可以在「Aa 阅读设置 → Parser API URL」手动填写 API 地址。
+
+后台服务端口：网页 `127.0.0.1:8765`；API `127.0.0.1:8000`；GROBID `8070` 只在 Docker 容器网络内使用。当前 Tailscale Serve 的网页 HTTPS 端口为 `443`，API HTTPS 端口为 `8443`。需要关闭时，从项目根目录执行 `.\scripts\stop-background.ps1`；这会禁用登录自启动并停止 API/GROBID，但不会删除论文和笔记。重新运行 `.\scripts\install-background.ps1` 即可启用。后台启动日志在 `result/background-service.log`。
+
+如果已经在这台电脑上启用 Tailscale Serve，可在同一 Tailscale 私有网络的其他电脑打开本机的 Serve 网页地址。上传文件、历史记录和笔记都会写入本机的 `userdata/`。要检查转发设置，运行 `tailscale serve status`；网页与 API 需要分别转发到本机的 8765 和 8000 端口。
+
+## 阅读设置、历史记录和批注
+
+- 右上角齿轮可设置字体、字号、宽度、预设或自定义主题，以及批注工具栏位置。设置保存在当前浏览器，并按 32 位“同步档案码”写到本机服务器的 `userdata/profiles/`。在另一台电脑输入相同档案码并点“从服务器读取设置”，即可同步外观偏好；档案码相当于可读取和修改这些偏好的密钥，只在自己的 Tailscale 私网中分享。
+- “历史记录”可切换“此浏览器”和“本机服务器”。每台电脑的浏览器各自保存新导入的 PDF 与解析结果；浏览器清理网站数据会清除这份本地副本。服务器记录和批注保存在 `userdata/documents/`，同一私网的其他电脑可访问。浏览器本地解析的论文批注保存在该浏览器的网站数据中。
+- 阅读器顶部工具栏可选高亮、下划线、区域标记、颜色和是否写笔记。选择正文文字后应用批注；有笔记时右侧“笔记”页签会显示同色注释。放大阅读区后，左右浮动按钮可重新打开目录和四类材料。
+- 对 Docling 独立识别的公式优先显示原 PDF 裁图；含复杂数学符号的正文段落也使用原 PDF 外观，并提供可复制文本。普通行内公式仍取决于 PDF 的文字层与 Docling 识别质量。重新导入论文才能应用新的解析规则；已保存的解析结果不会自动改写。
 
 ## 从已发布的网站连接 Windows 服务器
 

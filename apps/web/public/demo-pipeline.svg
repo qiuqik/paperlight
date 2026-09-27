@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 350" role="img" aria-labelledby="title description">
+  <title id="title">From PDF to a structured reading view</title>
+  <desc id="description">A paper PDF is parsed into structured sections, figures, tables and references, then shown in the Paperlight reader.</desc>
+  <rect width="960" height="350" fill="#f4f8f6"/>
+  <text x="480" y="52" fill="#25433d" font-family="Arial, sans-serif" font-size="24" font-weight="700" text-anchor="middle">From PDF to a readable paper</text>
+  <text x="480" y="79" fill="#617b72" font-family="Arial, sans-serif" font-size="14" text-anchor="middle">Preserve the paper's structure while improving navigation</text>
+
+  <rect x="36" y="112" width="252" height="190" rx="18" fill="#ffffff" stroke="#cbded6" stroke-width="2"/>
+  <rect x="56" y="130" width="58" height="74" rx="6" fill="#e6eee9" stroke="#75a99a" stroke-width="2"/>
+  <path d="M101 130v14h13" fill="none" stroke="#75a99a" stroke-width="2"/>
+  <path d="M67 157h34M67 168h30M67 179h32M67 190h24" stroke="#75a99a" stroke-width="3" stroke-linecap="round"/>
+  <text x="56" y="236" fill="#1f4c43" font-family="Arial, sans-serif" font-size="20" font-weight="700">1  Import PDF</text>
+  <text x="56" y="263" fill="#617b72" font-family="Arial, sans-serif" font-size="14">Start with the original paper</text>
+  <text x="56" y="283" fill="#617b72" font-family="Arial, sans-serif" font-size="14">and its page layout.</text>
+
+  <path d="M302 207h26m-9-9 9 9-9 9" fill="none" stroke="#218474" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <rect x="342" y="112" width="276" height="190" rx="18" fill="#ffffff" stroke="#cbded6" stroke-width="2"/>
+  <rect x="362" y="132" width="236" height="72" rx="10" fill="#e7f4ee"/>
+  <rect x="378" y="148" width="82" height="9" rx="4" fill="#238878"/>
+  <rect x="378" y="165" width="157" height="7" rx="3" fill="#a7cec0"/>
+  <rect x="378" y="179" width="121" height="7" rx="3" fill="#a7cec0"/>
+  <rect x="548" y="145" width="35" height="42" rx="5" fill="#bddfd1"/>
+  <text x="362" y="236" fill="#1f4c43" font-family="Arial, sans-serif" font-size="20" font-weight="700">2  Extract structure</text>
+  <text x="362" y="263" fill="#617b72" font-family="Arial, sans-serif" font-size="14">Sections, figures, tables,</text>
+  <text x="362" y="283" fill="#617b72" font-family="Arial, sans-serif" font-size="14">captions and references.</text>
+
+  <path d="M632 207h26m-9-9 9 9-9 9" fill="none" stroke="#218474" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <rect x="672" y="112" width="252" height="190" rx="18" fill="#ffffff" stroke="#cbded6" stroke-width="2"/>
+  <rect x="692" y="132" width="212" height="72" rx="10" fill="#e7f4ee"/>
+  <rect x="705" y="144" width="37" height="48" rx="4" fill="#c5dfd4"/>
+  <rect x="750" y="144" width="108" height="8" rx="4" fill="#238878"/>
+  <rect x="750" y="160" width="136" height="6" rx="3" fill="#a7cec0"/>
+  <rect x="750" y="173" width="123" height="6" rx="3" fill="#a7cec0"/>
+  <rect x="750" y="186" width="92" height="6" rx="3" fill="#a7cec0"/>
+  <text x="692" y="236" fill="#1f4c43" font-family="Arial, sans-serif" font-size="20" font-weight="700">3  Read and explore</text>
+  <text x="692" y="263" fill="#617b72" font-family="Arial, sans-serif" font-size="14">Follow the article and jump</text>
+  <text x="692" y="283" fill="#617b72" font-family="Arial, sans-serif" font-size="14">to its linked evidence.</text>
+</svg>

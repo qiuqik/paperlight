@@ -1,0 +1,9 @@
+.git
+node_modules
+.npm-cache
+apps/web/.next
+userdata
+result
+backend/storage
+backend/.venv
+*.pyc

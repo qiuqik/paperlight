@@ -1,23 +1,30 @@
 services:
-  api:
+  web:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: apps/web/Dockerfile
     ports:
-      - "${PAPERLIGHT_BIND_HOST:-127.0.0.1}:${PAPERLIGHT_API_PORT:-8000}:8000"
+      - "${PAPERLIGHT_WEB_BIND:-127.0.0.1}:8040:8040"
+    environment:
+      PAPERLIGHT_PARSER_URL: http://parser:8000
+    depends_on:
+      - parser
+    restart: unless-stopped
+  parser:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     environment:
       GROBID_URL: http://grobid:8070
       PAPERLIGHT_DATA_DIR: /userdata/documents
-      PAPERLIGHT_REFERENCE_MODE: ${PAPERLIGHT_REFERENCE_MODE:-auto}
       PAPERLIGHT_RESULT_DIR: /result
-      PAPERLIGHT_CORS_ORIGINS: ${PAPERLIGHT_CORS_ORIGINS:-http://localhost:8765,http://127.0.0.1:8765}
+      PAPERLIGHT_REFERENCE_MODE: ${PAPERLIGHT_REFERENCE_MODE:-auto}
       HF_HOME: /models/huggingface
       HF_HUB_DISABLE_XET: "1"
       HF_HUB_DOWNLOAD_TIMEOUT: "60"
     volumes:
-      - ./storage:/data
-      - ../userdata:/userdata
-      - ../result:/result
+      - ./userdata:/userdata
+      - ./result:/result
       - docling-model-cache:/models
     depends_on:
       - grobid

@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import logging
 import os
 import re
 import shutil
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -22,14 +26,46 @@ from .normalizer import extract_pdf_references, normalize_docling, parse_grobid
 
 APP_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("PAPERLIGHT_DATA_DIR", APP_DIR / "storage" / "documents")).resolve()
+RESULT_DIR = Path(os.environ["PAPERLIGHT_RESULT_DIR"]).resolve() if os.environ.get("PAPERLIGHT_RESULT_DIR") else None
 GROBID_URL = os.environ.get("GROBID_URL", "http://127.0.0.1:8070").rstrip("/")
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(80 * 1024 * 1024)))
 ALLOWED_ORIGINS = [value.strip() for value in os.environ.get("PAPERLIGHT_CORS_ORIGINS", "*").split(",") if value.strip()]
 
 app = FastAPI(title="Paperlight Document API", version="0.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS or ["*"], allow_credentials=False, allow_methods=["GET", "POST"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS or ["*"], allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"], allow_headers=["*"])
 jobs: dict[str, dict[str, Any]] = {}
 jobs_lock = Lock()
+annotation_lock = Lock()
+preferences_lock = Lock()
+import_lock = Lock()
+logger = logging.getLogger(__name__)
+
+
+def _save_result(document_id: str) -> None:
+    """Keep a local copy of every completed or failed parsing attempt."""
+    if RESULT_DIR is None:
+        return
+    try:
+        shutil.copytree(DATA_DIR / document_id, RESULT_DIR / document_id, dirs_exist_ok=True)
+    except OSError:
+        logger.exception("Could not save parsing result for %s", document_id)
+
+
+def _fetch_grobid(pdf_path: Path, filename: str, folder: Path) -> dict[str, Any]:
+    try:
+        with pdf_path.open("rb") as source:
+            response = httpx.post(
+                f"{GROBID_URL}/api/processFulltextDocument",
+                files={"input": (filename, source, "application/pdf")},
+                data={"consolidateHeader": "1", "consolidateCitations": "1", "includeRawCitations": "1", "teiCoordinates": ["figure", "table"]},
+                timeout=900,
+            )
+        response.raise_for_status()
+        (folder / "grobid.xml").write_text(response.text, encoding="utf-8")
+        return parse_grobid(response.text)
+    except (httpx.HTTPError, OSError, ValueError, ET.ParseError) as exc:
+        (folder / "grobid-error.txt").write_text(str(exc), encoding="utf-8")
+        return {}
 
 
 def _job_path(document_id: str) -> Path:
@@ -92,6 +128,31 @@ def health() -> dict[str, Any]:
     return {"status": "ok", "doclingAvailable": docling_available, "grobidUrl": GROBID_URL}
 
 
+@app.get("/api/preferences/{profile_id}")
+def get_preferences(profile_id: str) -> dict[str, Any]:
+    if not re.fullmatch(r"[a-f0-9]{32}", profile_id):
+        raise HTTPException(status_code=400, detail="Invalid profile ID.")
+    path = DATA_DIR.parent / "profiles" / f"{profile_id}.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+
+@app.put("/api/preferences/{profile_id}")
+def put_preferences(profile_id: str, preferences: dict[str, Any]) -> dict[str, Any]:
+    if not re.fullmatch(r"[a-f0-9]{32}", profile_id):
+        raise HTTPException(status_code=400, detail="Invalid profile ID.")
+    allowed = {"fontSize", "width", "font", "theme", "customPaper", "customInk", "expanded", "toolbarDock", "annotationMode", "annotationColor", "annotationNote"}
+    value = {key: entry for key, entry in preferences.items() if key in allowed and isinstance(entry, (str, int, float, bool))}
+    if len(json.dumps(value)) > 4000:
+        raise HTTPException(status_code=413, detail="Preferences are too large.")
+    folder = DATA_DIR.parent / "profiles"
+    with preferences_lock:
+        folder.mkdir(parents=True, exist_ok=True)
+        temporary = folder / f"{profile_id}.tmp"
+        temporary.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(folder / f"{profile_id}.json")
+    return value
+
+
 @app.post("/api/documents", response_model=ProcessingStatus, status_code=202)
 async def create_document(background_tasks: BackgroundTasks, file: UploadFile = File(...)) -> ProcessingStatus:
     filename = Path(file.filename or "paper.pdf").name
@@ -102,6 +163,7 @@ async def create_document(background_tasks: BackgroundTasks, file: UploadFile = 
     folder.mkdir(parents=True, exist_ok=False)
     original = folder / "original.pdf"
     size = 0
+    digest = hashlib.sha256()
     try:
         with original.open("wb") as target:
             while chunk := await file.read(1024 * 1024):
@@ -109,6 +171,7 @@ async def create_document(background_tasks: BackgroundTasks, file: UploadFile = 
                 if size > MAX_UPLOAD_BYTES:
                     raise HTTPException(status_code=413, detail=f"PDF exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.")
                 target.write(chunk)
+                digest.update(chunk)
     except Exception:
         shutil.rmtree(folder, ignore_errors=True)
         raise
@@ -117,9 +180,179 @@ async def create_document(background_tasks: BackgroundTasks, file: UploadFile = 
     if size == 0:
         shutil.rmtree(folder, ignore_errors=True)
         raise HTTPException(status_code=400, detail="Uploaded PDF is empty.")
-    _set_job(document_id, documentId=document_id, status="processing", stage="queued", progress=0.02)
+    fingerprint = digest.hexdigest()
+    with import_lock:
+        for existing in DATA_DIR.iterdir():
+            if existing == folder or not existing.is_dir() or not re.fullmatch(r"[a-f0-9]{32}", existing.name):
+                continue
+            status = _get_job(existing.name)
+            if status and status.get("fingerprint") == fingerprint and status.get("status") in {"processing", "ready"}:
+                existing_document = existing / "document.json"
+                if status["status"] == "ready":
+                    try:
+                        status["document"] = json.loads(existing_document.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        continue
+                shutil.rmtree(folder, ignore_errors=True)
+                return ProcessingStatus(**status)
+        _set_job(document_id, documentId=document_id, status="processing", stage="queued", progress=0.02, filename=filename, createdAt=time.time(), fingerprint=fingerprint)
     background_tasks.add_task(_process_document, document_id, filename)
     return ProcessingStatus(documentId=document_id, status="processing", stage="queued", progress=0.02)
+
+
+def _read_annotations(folder: Path) -> list[dict[str, Any]]:
+    path = folder / "annotations.json"
+    if not path.is_file():
+        return []
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+@app.get("/api/documents")
+def list_documents() -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    if not DATA_DIR.is_dir():
+        return records
+    for folder in DATA_DIR.iterdir():
+        if not folder.is_dir() or not re.fullmatch(r"[a-f0-9]{32}", folder.name):
+            continue
+        status_path = folder / "status.json"
+        if not status_path.is_file():
+            continue
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            document_path = folder / "document.json"
+            metadata = json.loads(document_path.read_text(encoding="utf-8")).get("metadata", {}) if document_path.is_file() else {}
+            records.append({"documentId": folder.name, "fingerprint": status.get("fingerprint", ""), "title": metadata.get("title") or status.get("filename") or "PDF 文档", "status": status.get("status", "processing"), "createdAt": status.get("createdAt", status_path.stat().st_mtime), "pageCount": metadata.get("pageCount", 0), "annotationCount": len(_read_annotations(folder))})
+        except (OSError, ValueError, TypeError):
+            continue
+    return sorted(records, key=lambda item: item["createdAt"], reverse=True)
+
+
+@app.get("/api/documents/{document_id}/annotations")
+def get_annotations(document_id: str) -> list[dict[str, Any]]:
+    if not re.fullmatch(r"[a-f0-9]{32}", document_id) or not (DATA_DIR / document_id / "status.json").is_file():
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return _read_annotations(DATA_DIR / document_id)
+
+
+@app.post("/api/documents/{document_id}/annotations", status_code=201)
+def create_annotation(document_id: str, annotation: dict[str, Any]) -> dict[str, Any]:
+    folder = DATA_DIR / document_id
+    if not re.fullmatch(r"[a-f0-9]{32}", document_id) or not (folder / "document.json").is_file():
+        raise HTTPException(status_code=404, detail="Document not found.")
+    if isinstance(annotation.get("anchor"), dict):
+        return _create_v2_annotation(folder, document_id, annotation)
+    block_id = str(annotation.get("blockId", ""))[:100]
+    quote = str(annotation.get("quote", ""))[:3000]
+    note = str(annotation.get("note", ""))[:5000]
+    start, end = annotation.get("start"), annotation.get("end")
+    if not block_id or not quote.strip() or not isinstance(start, int) or not isinstance(end, int) or start < 0 or end <= start or end - start > 3000:
+        raise HTTPException(status_code=422, detail="Invalid text selection.")
+    document = json.loads((folder / "document.json").read_text(encoding="utf-8"))
+    if not any(block.get("id") == block_id for section in document.get("sections", []) for block in section.get("blocks", [])):
+        raise HTTPException(status_code=422, detail="Selected paragraph does not exist.")
+    mode = annotation.get("mode", "highlight")
+    if mode not in {"highlight", "underline", "area"}:
+        raise HTTPException(status_code=422, detail="Invalid annotation mode.")
+    color = str(annotation.get("color", "#ffe59a"))
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+        raise HTTPException(status_code=422, detail="Invalid annotation color.")
+    record = {"id": uuid.uuid4().hex, "blockId": block_id, "quote": quote, "note": note, "start": start, "end": end, "mode": mode, "color": color, "createdAt": time.time()}
+    with annotation_lock:
+        records = _read_annotations(folder)
+        records.append(record)
+        temporary = folder / "annotations.json.tmp"
+        temporary.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(folder / "annotations.json")
+    return record
+
+
+def _create_v2_annotation(folder: Path, document_id: str, annotation: dict[str, Any]) -> dict[str, Any]:
+    """Store stable block offsets or normalized page/figure coordinates."""
+    kind = annotation.get("type")
+    if kind not in {"highlight", "underline", "note", "area"}:
+        raise HTTPException(status_code=422, detail="Invalid annotation type.")
+    color = str(annotation.get("color", ""))
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+        raise HTTPException(status_code=422, detail="Invalid annotation color.")
+    anchor = annotation["anchor"]
+    document = json.loads((folder / "document.json").read_text(encoding="utf-8"))
+    blocks = {block.get("id"): block for section in document.get("sections", []) for block in section.get("blocks", [])}
+    if kind == "area":
+        block_id = anchor.get("blockId")
+        box = anchor.get("bbox")
+        if block_id not in blocks or not isinstance(box, dict) or not isinstance(anchor.get("page"), int):
+            raise HTTPException(status_code=422, detail="Invalid area anchor.")
+        try:
+            x, y, width, height = (float(box[name]) for name in ("x", "y", "width", "height"))
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="Invalid area coordinates.") from None
+        if not (0 <= x <= 1 and 0 <= y <= 1 and 0 < width <= 1 - x and 0 < height <= 1 - y):
+            raise HTTPException(status_code=422, detail="Area coordinates are outside the block.")
+    else:
+        start, end = anchor.get("start"), anchor.get("end")
+        if not isinstance(start, dict) or not isinstance(end, dict):
+            raise HTTPException(status_code=422, detail="Invalid text anchor.")
+        if start.get("blockId") not in blocks or end.get("blockId") not in blocks:
+            raise HTTPException(status_code=422, detail="Selected block does not exist.")
+        if not all(isinstance(point.get("offset"), int) and point["offset"] >= 0 for point in (start, end)):
+            raise HTTPException(status_code=422, detail="Invalid text offsets.")
+        quote = anchor.get("quote")
+        if not isinstance(quote, str) or not quote.strip() or len(quote) > 10000:
+            raise HTTPException(status_code=422, detail="Invalid text quote.")
+    record_id = str(annotation.get("id", ""))
+    if not re.fullmatch(r"[a-f0-9-]{32,36}", record_id):
+        record_id = uuid.uuid4().hex
+    note = str(annotation.get("note") or "")[:5000]
+    record = {"id": record_id, "documentId": document_id, "type": kind, "color": color, "anchor": anchor, "note": note, "createdAt": time.time()}
+    with annotation_lock:
+        records = _read_annotations(folder)
+        if any(item.get("id") == record_id for item in records):
+            return next(item for item in records if item.get("id") == record_id)
+        records.append(record)
+        temporary = folder / "annotations.json.tmp"
+        temporary.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(folder / "annotations.json")
+    return record
+
+
+@app.patch("/api/documents/{document_id}/annotations/{annotation_id}")
+def update_annotation(document_id: str, annotation_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+    folder = DATA_DIR / document_id
+    if not re.fullmatch(r"[a-f0-9]{32}", document_id) or not (folder / "document.json").is_file():
+        raise HTTPException(status_code=404, detail="Document not found.")
+    if not isinstance(changes.get("note"), str) or len(changes["note"]) > 5000:
+        raise HTTPException(status_code=422, detail="Invalid note.")
+    with annotation_lock:
+        records = _read_annotations(folder)
+        record = next((item for item in records if item.get("id") == annotation_id), None)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Annotation not found.")
+        record["note"] = changes["note"]
+        record["updatedAt"] = time.time()
+        temporary = folder / "annotations.json.tmp"
+        temporary.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(folder / "annotations.json")
+    return record
+
+
+@app.delete("/api/documents/{document_id}/annotations/{annotation_id}", status_code=204)
+def delete_annotation(document_id: str, annotation_id: str) -> None:
+    folder = DATA_DIR / document_id
+    if not re.fullmatch(r"[a-f0-9]{32}", document_id) or not (folder / "document.json").is_file():
+        raise HTTPException(status_code=404, detail="Document not found.")
+    with annotation_lock:
+        records = _read_annotations(folder)
+        remaining = [record for record in records if record.get("id") != annotation_id]
+        if len(remaining) == len(records):
+            raise HTTPException(status_code=404, detail="Annotation not found.")
+        temporary = folder / "annotations.json.tmp"
+        temporary.write_text(json.dumps(remaining, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(folder / "annotations.json")
 
 
 @app.get("/api/documents/{document_id}", response_model=ProcessingStatus)
@@ -150,6 +383,9 @@ def get_asset(document_id: str, asset_name: str) -> FileResponse:
 def _process_document(document_id: str, filename: str) -> None:
     folder = DATA_DIR / document_id
     pdf_path = folder / "original.pdf"
+    started = time.perf_counter()
+    timings: dict[str, float] = {}
+    executor: ThreadPoolExecutor | None = None
     try:
         _set_job(document_id, stage="loading_parser", progress=0.08)
         try:
@@ -159,7 +395,18 @@ def _process_document(document_id: str, filename: str) -> None:
         except ImportError as exc:
             raise RuntimeError("Docling is not installed. Install backend/requirements.txt before processing PDFs.") from exc
 
+        reference_started = time.perf_counter()
+        fallback_references = extract_pdf_references(pdf_path)
+        timings["referenceScanSeconds"] = round(time.perf_counter() - reference_started, 2)
+        reference_mode = os.environ.get("PAPERLIGHT_REFERENCE_MODE", "auto").lower()
+        use_grobid = reference_mode == "full" or (reference_mode != "fast" and len(fallback_references) < 10)
+        if use_grobid:
+            executor = ThreadPoolExecutor(max_workers=1)
+            grobid_started = time.perf_counter()
+            grobid_future = executor.submit(_fetch_grobid, pdf_path, filename, folder)
+
         _set_job(document_id, stage="extracting_structure", progress=0.15)
+        docling_started = time.perf_counter()
         options = PdfPipelineOptions(do_ocr=False, do_table_structure=True, generate_picture_images=True, images_scale=2.0)
         converter = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)})
         result = converter.convert(str(pdf_path))
@@ -173,41 +420,29 @@ def _process_document(document_id: str, filename: str) -> None:
             result = converter.convert(str(pdf_path))
             docling_doc = result.document
         (folder / "docling.json").write_text(json.dumps(docling_doc.export_to_dict(), ensure_ascii=False, default=str), encoding="utf-8")
+        timings["doclingSeconds"] = round(time.perf_counter() - docling_started, 2)
 
         _set_job(document_id, stage="linking_references", progress=0.74)
-        grobid_data: dict[str, Any] = {}
-        grobid_xml: str | None = None
-        try:
-            with pdf_path.open("rb") as source:
-                response = httpx.post(
-                    f"{GROBID_URL}/api/processFulltextDocument",
-                    files={"input": (filename, source, "application/pdf")},
-                    data={
-                        "consolidateHeader": "1",
-                        "consolidateCitations": "1",
-                        "includeRawCitations": "1",
-                        "teiCoordinates": ["figure", "table"],
-                    },
-                    timeout=900,
-                )
-            response.raise_for_status()
-            grobid_xml = response.text
-            (folder / "grobid.xml").write_text(grobid_xml, encoding="utf-8")
-            grobid_data = parse_grobid(grobid_xml)
-        except (httpx.HTTPError, OSError, ValueError, ET.ParseError) as exc:
-            # GROBID is a citation enhancement. A temporary outage must not discard
-            # a usable Docling document.
-            (folder / "grobid-error.txt").write_text(str(exc), encoding="utf-8")
+        grobid_data = grobid_future.result() if use_grobid else {}
+        timings["grobidSeconds"] = round(time.perf_counter() - grobid_started, 2) if use_grobid else 0.0
 
         _set_job(document_id, stage="normalizing_document", progress=0.9)
-        fallback_references = extract_pdf_references(pdf_path)
+        normalize_started = time.perf_counter()
         model = normalize_docling(docling_doc, document_id, folder, grobid_data, fallback_references)
-        if not grobid_data:
+        model.fingerprint = str(_get_job(document_id).get("fingerprint", ""))
+        if use_grobid and not grobid_data:
             model.metadata.notice = "GROBID 暂不可用；已尝试从 PDF 文本恢复编号参考文献，期刊、DOI 等出版元数据可能不完整。"
         elif not grobid_data.get("references"):
             model.metadata.notice = "正文结构已提取；GROBID 未识别参考文献，因此引用关联可能不完整。"
         document_json = model.model_dump(mode="json")
         (folder / "document.json").write_text(json.dumps(document_json, ensure_ascii=False), encoding="utf-8")
-        _set_job(document_id, status="ready", stage="ready", progress=1.0)
+        timings["normalizingSeconds"] = round(time.perf_counter() - normalize_started, 2)
+        timings["totalSeconds"] = round(time.perf_counter() - started, 2)
+        _set_job(document_id, status="ready", stage="ready", progress=1.0, timings=timings)
     except Exception as exc:  # Persist failure so the client can explain it.
-        _set_job(document_id, status="failed", stage="failed", progress=1.0, error=str(exc)[:800])
+        timings["totalSeconds"] = round(time.perf_counter() - started, 2)
+        _set_job(document_id, status="failed", stage="failed", progress=1.0, error=str(exc)[:800], timings=timings)
+    finally:
+        if executor:
+            executor.shutdown(wait=False, cancel_futures=True)
+        _save_result(document_id)

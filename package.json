@@ -1,0 +1,10 @@
+{
+  "name": "paperlight",
+  "private": true,
+  "workspaces": ["apps/web"],
+  "scripts": {
+    "dev": "npm run dev -w @paperlight/web",
+    "build": "npm run build -w @paperlight/web",
+    "typecheck": "npm run typecheck -w @paperlight/web"
+  }
+}

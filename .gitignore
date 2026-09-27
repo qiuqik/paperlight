@@ -4,7 +4,14 @@ __pycache__/
 .venv/
 backend/.venv/
 backend/storage/
+result/
+userdata/
 papers/
 架构规划说明.txt
 .env
 *.log
+node_modules/
+.npm-cache/
+.next-swc-cache/
+.next/
+*.tsbuildinfo

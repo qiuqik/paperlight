@@ -20,16 +20,19 @@ class InlineNode(BaseModel):
 
 class Block(BaseModel):
     id: str
-    type: Literal["paragraph", "heading", "figure", "table", "equation", "list", "quote", "footnote", "requirement"]
+    type: Literal["paragraph", "heading", "figure", "table", "equation", "list", "quote", "footnote", "requirement", "code"]
     text: str = ""
     content: list[InlineNode] = Field(default_factory=list)
     level: int | None = None
     page: int | None = None
+    bbox: dict[str, float] | None = None
+    order: int | None = None
     items: list[str] = Field(default_factory=list)
     number: int | None = None
     label: str = ""
     caption: str = ""
     src: str | None = None
+    beforeHeading: bool = False
     headers: list[Any] = Field(default_factory=list)
     rows: list[list[Any]] = Field(default_factory=list)
 
@@ -68,17 +71,21 @@ class Metadata(BaseModel):
     indexTerms: str = ""
     received: list[str] = Field(default_factory=list)
     funding: list[str] = Field(default_factory=list)
+    supplementary: list[str] = Field(default_factory=list)
+    authorNotes: list[str] = Field(default_factory=list)
     notice: str = ""
 
 
 class DocumentModel(BaseModel):
     id: str
+    fingerprint: str = ""
     status: Literal["ready"] = "ready"
     metadata: Metadata
     sections: list[Section]
     references: list[Reference] = Field(default_factory=list)
     figures: list[Block] = Field(default_factory=list)
     tables: list[Block] = Field(default_factory=list)
+    pages: list[dict[str, float]] = Field(default_factory=list)
     citationLinkStatus: Literal["linked", "partial", "unresolved"] = "unresolved"
     source: str = "docling"
 
@@ -90,3 +97,4 @@ class ProcessingStatus(BaseModel):
     progress: float = 0
     document: DocumentModel | None = None
     error: str | None = None
+    timings: dict[str, float] = Field(default_factory=dict)

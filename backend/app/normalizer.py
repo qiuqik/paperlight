@@ -33,7 +33,7 @@ _KNOWN_METADATA = {
 
 def clean_text(value: str | None) -> str:
     value = unicodedata.normalize("NFKC", value or "")
-    value = re.sub(r"[\u00ad\u034f\u200b-\u200f\ufeff\ufffd]", "", value)
+    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\u00ad\u034f\u200b-\u200f\ufeff\ufffd-\uffff]", "", value)
     value = re.sub(r"([A-Za-z]{2,})-\s+([a-z])", r"\1\2", value)
     value = re.sub(r"\s+", " ", value).strip()
     return value
@@ -249,7 +249,41 @@ def _page_no(item: Any) -> int | None:
     return getattr(prov[0], "page_no", None) if prov else None
 
 
-def _render_picture_from_pdf(pdf_path: Path, item: Any, asset_path: Path) -> bool:
+def _block_bbox(location: Any, pdf_document: Any) -> dict[str, float] | None:
+    """Preserve PDF geometry in page points using a top-left origin."""
+    if location is None or not getattr(location, "bbox", None) or pdf_document is None:
+        return None
+    try:
+        page = pdf_document[int(location.page_no) - 1]
+        _, page_height = page.get_size()
+        box = location.bbox
+        left, right = sorted((float(box.l), float(box.r)))
+        bottom, top = sorted((float(box.b), float(box.t)))
+        y = bottom if str(box.coord_origin).lower().endswith("topleft") else page_height - top
+        return {"x": left, "y": y, "width": right - left, "height": top - bottom}
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def _place_figures_before_intro(sections: list[Section], figures: list[Block], heading: tuple[int, float] | None) -> None:
+    if not heading:
+        return
+    heading_page, heading_y = heading
+    introduction = next((section for section in sections if _heading_key(section.title) == "introduction" and section.type == "body"), None)
+    for figure in figures:
+        if figure.page != heading_page or not figure.bbox or figure.bbox["y"] + figure.bbox["height"] > heading_y + 2:
+            continue
+        figure.beforeHeading = True
+        if introduction:
+            for section in sections:
+                if section is not introduction and figure in section.blocks:
+                    section.blocks.remove(figure)
+            if figure not in introduction.blocks:
+                before_count = sum(block.beforeHeading for block in introduction.blocks)
+                introduction.blocks.insert(before_count, figure)
+
+
+def _render_picture_from_pdf(pdf_path: Path, item: Any, asset_path: Path, margin: float = 5) -> bool:
     """Use Docling's figure box and render pixels from the source PDF at 3x."""
     if not pdf_path.exists() or not getattr(item, "prov", None):
         return False
@@ -269,13 +303,19 @@ def _render_picture_from_pdf(pdf_path: Path, item: Any, asset_path: Path) -> boo
             y0, y1 = bottom, top
         else:
             y0, y1 = height - top, height - bottom
+        # Layout boxes tend to stop at the last bar or glyph. A small margin
+        # preserves chart ticks and panel borders without reaching the next column.
         scale = 3
-        bounds = (max(0, round(left * scale)), max(0, round(y0 * scale)),
-                  min(round(width * scale), round(right * scale)), min(round(height * scale), round(y1 * scale)))
+        bounds = (max(0, round((left - margin) * scale)), max(0, round((y0 - margin) * scale)),
+                  min(round(width * scale), round((right + margin) * scale)), min(round(height * scale), round((y1 + margin) * scale)))
         if bounds[2] - bounds[0] < 30 or bounds[3] - bounds[1] < 30:
             pdf.close()
             return False
-        image = page.render(scale=scale).to_pil().crop(bounds)
+        # PDFium can rasterize only the requested rectangle. Rendering every
+        # full page for each figure is particularly costly in long papers.
+        crop = (bounds[0] / scale, (height * scale - bounds[3]) / scale,
+                (width * scale - bounds[2]) / scale, bounds[1] / scale)
+        image = page.render(scale=scale, crop=crop).to_pil()
         image.save(asset_path, format="PNG")
         pdf.close()
         return True
@@ -283,19 +323,114 @@ def _render_picture_from_pdf(pdf_path: Path, item: Any, asset_path: Path) -> boo
         return False
 
 
-def _caption(doc: Any, item: Any) -> str:
+def _caption(doc: Any, item: Any, source_text: Any = None) -> str:
     captions = getattr(item, "captions", []) or []
     values = []
     for caption in captions:
-        value = getattr(caption, "text", None)
+        resolved = caption
+        value = getattr(resolved, "text", None)
         if value is None and hasattr(caption, "resolve"):
             try:
-                value = getattr(caption.resolve(doc), "text", "")
+                resolved = caption.resolve(doc)
+                value = getattr(resolved, "text", "")
             except Exception:
                 value = ""
         if value:
-            values.append(clean_text(value))
+            values.append(source_text(resolved) if source_text else clean_text(value))
     return " ".join(values)
+
+
+def _caption_body(caption: str, kind: str, number: int) -> str:
+    prefix = r"(?:fig(?:ure)?\.?)" if kind == "figure" else r"table"
+    return re.sub(rf"^\s*{prefix}\s*{number}\s*[.:]?\s*", "", caption, count=1, flags=re.I).strip()
+
+
+def _upsert_affiliation(affiliations: list[str], value: str) -> None:
+    value = clean_text(value).rstrip(".")
+    if not value:
+        return
+    words = lambda text: set(re.findall(r"[a-z0-9]+", text.casefold()))
+    candidate = words(value)
+    for index, existing in enumerate(affiliations):
+        old = words(existing)
+        if candidate and old and len(candidate & old) / len(candidate | old) >= 0.65:
+            if value.count(",") > existing.count(","):
+                affiliations[index] = value
+            return
+    affiliations.append(value)
+
+
+def _university_author_names(value: str) -> list[str]:
+    """Recover names from compact first-page author/institution lines."""
+    pattern = r"\b([A-Z][a-z]+\s+[A-Z][a-z]+)\s*(?:\*+|[†‡§¶]|\|\|)?\s+(?=(?:University (?:of\s+)?[A-Z]|[A-Z][a-z]+\s+(?:Institute|Labs?|Research)\b))"
+    return list(dict.fromkeys(name for name in re.findall(pattern, value)
+                              if name.split()[-1] not in {"Research", "Institute", "Labs", "University"}))
+
+
+def _merge_continuations(sections: list[Section], geometry: dict[str, tuple[int, tuple[float, float, float, float]]]) -> None:
+    """Join Docling fragments only when text and page geometry indicate continuation."""
+    for section in sections:
+        merged: list[Block] = []
+        for block in section.blocks:
+            previous = merged[-1] if merged else None
+            if previous and previous.type == block.type == "paragraph" and previous.text and block.text and not previous.src and not block.src:
+                prior = geometry.get(previous.id)
+                following = geometry.get(block.id)
+                incomplete = not re.search(r"[.!?][\]\"')]*$", previous.text.strip())
+                continuation = bool(re.match(r"^[a-z]", block.text))
+                close_in_order = False
+                if prior and following:
+                    first_page, (left, bottom, right, top) = prior
+                    next_page, (next_left, next_bottom, next_right, next_top) = following
+                    close_in_order = next_page == first_page + 1 or (
+                        next_page == first_page and (
+                            (abs(next_left - left) < 20 and bottom >= next_top - 5) or
+                            (next_left > right and next_top > top)
+                        )
+                    )
+                if incomplete and continuation and close_in_order:
+                    separator = "" if previous.text.endswith("-") else " "
+                    if not separator:
+                        previous.text = previous.text[:-1]
+                        if previous.content and previous.content[-1].type == "text":
+                            previous.content[-1].text = previous.content[-1].text.rstrip("-")
+                    previous.text += separator + block.text
+                    previous.content.extend(([InlineNode(type="text", text=separator)] if separator else []) + block.content)
+                    continue
+            merged.append(block)
+        section.blocks = merged
+
+
+def _reposition_figures(sections: list[Section], geometry: dict[str, tuple[int, tuple[float, float, float, float]]], figure_boxes: dict[str, tuple[int, float, float, float, float]]) -> None:
+    """Move a misplaced figure next to the closest paragraph on its PDF page."""
+    located = [(section, block) for section in sections for block in section.blocks if block.type == "figure" and block.id in figure_boxes and not block.beforeHeading]
+    for source, figure in located:
+        page, left, bottom, right, top = figure_boxes[figure.id]
+        options: list[tuple[float, Section, Block, bool]] = []
+        for section in sections:
+            if section.type == "abstract":
+                continue
+            for paragraph in section.blocks:
+                if paragraph.type != "paragraph" or paragraph.id not in geometry:
+                    continue
+                paragraph_page, (p_left, p_bottom, p_right, p_top) = geometry[paragraph.id]
+                if paragraph_page != page:
+                    continue
+                above = p_bottom >= top - 2
+                below = p_top <= bottom + 2
+                if not (above or below):
+                    continue
+                gap = max(0.0, p_bottom - top) if above else max(0.0, bottom - p_top)
+                overlap = max(0.0, min(right, p_right) - max(left, p_left))
+                score = gap + (0 if overlap > 10 else 100) + (0 if section is source else 45)
+                if score <= 150:
+                    options.append((score, section, paragraph, below))
+        if not options:
+            continue
+        _, target_section, anchor, before = min(options, key=lambda option: option[0])
+        source.blocks.remove(figure)
+        anchor_index = target_section.blocks.index(anchor)
+        target_section.blocks.insert(anchor_index if before else anchor_index + 1, figure)
 
 
 def _heading_level(text: str) -> int:
@@ -304,7 +439,7 @@ def _heading_level(text: str) -> int:
         return 1
     if re.match(r"^[A-Z]\.\s+", text):
         return 2
-    match = re.match(r"^(\d+(?:\.\d+)+)\s+", text)
+    match = re.match(r"^(\d+(?:\.\d+)*)\.?\s+", text)
     if match:
         return min(match.group(1).count(".") + 1, 3)
     return 1
@@ -324,8 +459,12 @@ def _match_citations(text: str, grobid_body: list[dict[str, Any]], references: l
     best: dict[str, Any] | None = None
     best_score = 0.0
     for candidate in grobid_body:
-        other = re.sub(r"\W+", " ", candidate["text"].casefold()).strip()
+        other = candidate.get("_normalized") or re.sub(r"\W+", " ", candidate["text"].casefold()).strip()
         if not other:
+            continue
+        # A pair with this length ratio cannot reach the 0.88 acceptance
+        # threshold, so avoid the expensive character alignment altogether.
+        if 2 * min(len(normalized), len(other)) < 0.88 * (len(normalized) + len(other)):
             continue
         if normalized in other or other in normalized:
             score = min(len(normalized), len(other)) / max(len(normalized), len(other))
@@ -408,7 +547,7 @@ def extract_pdf_references(pdf_path: Path) -> list[dict[str, Any]]:
             "number": int(match.group(1)),
             "authors": authors,
             "title": ref_title or raw,
-            "venue": clean_text(remainder[:year_match.start()]).rstrip(" ,.") if year_match else "",
+            "venue": clean_text(remainder[:year_match.start()]).rstrip(" ,.") if quote and year_match else "",
             "year": int(year_match.group()) if year_match else None,
             "doi": doi_match.group().rstrip(".)]") if doi_match else "",
             "url": url_match.group().rstrip(".,)") if url_match else "",
@@ -455,24 +594,264 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
     use_numbered_references = bool(fallback_references and (not grobid_references or len(fallback_references) >= len(grobid_references) * 0.8))
     reference_entries = fallback_references if use_numbered_references else grobid_references
     references = [Reference(**{**entry, "preview": entry.get("preview") or entry.get("title", "")}) for entry in reference_entries]
+    grobid_body = [
+        {**entry, "_normalized": re.sub(r"\W+", " ", entry.get("text", "").casefold()).strip()}
+        for entry in grobid.get("bodyParagraphs", [])
+    ]
     body = docling_doc
     title = grobid.get("title", "")
     authors = grobid.get("authors", [])
     current: Section | None = None
+    pending_figures: list[Block] = []
+    pending_tables: list[Block] = []
     figure_index = 0
+    used_figure_ids: set[str] = set()
     table_index = 0
+    used_table_ids: set[str] = set()
     abstract = grobid.get("abstract", "")
     index_terms = grobid.get("indexTerms", "")
     affiliations = list(grobid.get("affiliations", []))
+    affiliation_details: list[str] = []
+    author_markers: dict[int, list[str]] = {}
+    numbered_affiliations: list[tuple[int, str]] = []
     received = list(grobid.get("received", []))
+    funding = list(grobid.get("funding", []))
+    supplementary: list[str] = []
+    author_notes: list[str] = []
+    doi = grobid.get("doi", "")
+    geometry: dict[str, tuple[int, tuple[float, float, float, float]]] = {}
+    pdf_document = None
+    text_pages: dict[int, Any] = {}
+    figure_regions: dict[int, list[tuple[float, float, float, float]]] = {}
+    for picture in getattr(docling_doc, "pictures", []) or []:
+        if not getattr(picture, "captions", None):
+            continue
+        provenance = getattr(picture, "prov", None) or []
+        if provenance and getattr(provenance[0], "bbox", None):
+            box = provenance[0].bbox
+            figure_regions.setdefault(int(provenance[0].page_no), []).append((float(box.l), float(box.b), float(box.r), float(box.t)))
+    try:
+        import pypdfium2 as pdfium
+        pdf_document = pdfium.PdfDocument(str(document_dir / "original.pdf"))
+    except (ImportError, OSError):
+        pass
+    page_sizes = []
+    if pdf_document:
+        for page_index in range(len(pdf_document)):
+            width, height = pdf_document[page_index].get_size()
+            page_sizes.append({"number": page_index + 1, "width": float(width), "height": float(height)})
+
+    def source_text(item: Any) -> str:
+        value = clean_text(getattr(item, "text", ""))
+        provenance = getattr(item, "prov", None) or []
+        if not pdf_document or not provenance or not getattr(provenance[0], "bbox", None):
+            return value
+        location = provenance[0]
+        try:
+            page_number = int(location.page_no)
+            page = pdf_document[page_number - 1]
+            if page_number not in text_pages:
+                text_pages[page_number] = page.get_textpage()
+            text_page = text_pages[page_number]
+            box = location.bbox
+            if str(box.coord_origin).lower().endswith("topleft"):
+                height = page.get_size()[1]
+                bottom, top = height - float(box.b), height - float(box.t)
+            else:
+                bottom, top = float(box.b), float(box.t)
+            candidate = clean_text(text_page.get_text_bounded(left=float(box.l), bottom=bottom, right=float(box.r), top=top))
+            compact = lambda text: "".join(char for char in text.casefold() if char.isalnum())
+            original, recovered = compact(value), compact(candidate)
+            if original and recovered and SequenceMatcher(None, original, recovered, autojunk=False).ratio() >= 0.97:
+                return candidate
+        except (IndexError, OSError, ValueError):
+            pass
+        return value
+
+    # Docling may retain author text inside a picture's text collection while
+    # omitting it from iterate_items(). Read front matter directly as well.
+    if pdf_document:
+        first_page_height = pdf_document[0].get_size()[1]
+        first_heading_seen = False
+        for candidate in getattr(docling_doc, "texts", []) or []:
+            provenance = getattr(candidate, "prov", None) or []
+            if not provenance or int(provenance[0].page_no) != 1 or not getattr(provenance[0], "bbox", None) or float(provenance[0].bbox.b) <= first_page_height * 0.68:
+                continue
+            line = source_text(candidate)
+            spaced_line = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", line)
+            numbered_names = re.findall(r"\b([A-Z][a-z]+\s+[A-Z][a-z]+)\s*\d", spaced_line)
+            if len(numbered_names) >= 2:
+                authors = list(dict.fromkeys([*authors, *numbered_names]))
+            candidate_label = getattr(getattr(candidate, "label", None), "value", "")
+            if candidate_label == "section_header" and not first_heading_seen:
+                first_heading_seen = True
+                continue
+            compact_names = _university_author_names(line)
+            if compact_names:
+                authors = list(dict.fromkeys([*authors, *compact_names]))
+            email = re.search(r"\s+\S+@\S+", line)
+            if email:
+                possible_name = clean_text(line[:email.start()]).strip("*†‡§¶ ")
+                if re.fullmatch(r"[A-Z][a-z]+(?:\s+[A-Z]\.)?(?:\s+[A-Z][a-z]+){1,2}", possible_name):
+                    authors = list(dict.fromkeys([*authors, possible_name]))
+            bare_name = clean_text(line).strip("*†‡§¶ ")
+            if (candidate_label == "section_header" or re.search(r"[*†‡§¶]\s*$", line)) and re.fullmatch(r"[A-Z][a-z]+(?:\s+[A-Z]\.)?(?:\s+[A-Z][a-z]+){1,2}", bare_name):
+                authors = list(dict.fromkeys([*authors, bare_name]))
+            if not authors and line.count(",") >= 2 and re.search(r"\b(?:University|Institute|Research|Labs?)\b", line):
+                name_part = re.split(r"\b(?:[A-Z][a-z]+\s+Research|University|Institute|Labs?)\b", line, maxsplit=1)[0]
+                listed_names = [clean_text(part) for part in re.split(r",\s*|\s+and\s+", name_part)]
+                if len(listed_names) >= 2 and all(3 < len(name) < 55 and " " in name for name in listed_names):
+                    authors = listed_names
+            if line.count(",") < 2 or len(line) >= 180:
+                continue
+            names = [re.sub(r"(?<=[a-z])(?=[A-Z])", " ", part).strip() for part in re.split(r",\s*|\s+and\s+", line)]
+            if len(names) >= 3 and all(re.fullmatch(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}", name) for name in names):
+                authors = authors or names
+                break
+        if not authors:
+            for candidate in getattr(docling_doc, "texts", []) or []:
+                provenance = getattr(candidate, "prov", None) or []
+                if not provenance or int(provenance[0].page_no) != 1:
+                    continue
+                address = re.match(r"^Authors?[’']\s+address:\s*(.*)", source_text(candidate), re.I)
+                if not address:
+                    continue
+                name_part = re.split(r",\s*(?:National|University|Institute|School)\b", address.group(1), maxsplit=1)[0]
+                address_names = [clean_text(name) for name in name_part.split(";") if clean_text(name)]
+                if len(address_names) >= 2:
+                    authors = address_names
+                    break
+
     seen_first_page_title = False
+    abstract_heading_locations = [
+        candidate.prov[0].bbox for candidate in getattr(docling_doc, "texts", []) or []
+        if getattr(getattr(candidate, "label", None), "value", "").lower() == "section_header"
+        and re.sub(r"\W+", "", getattr(candidate, "text", "").casefold()) == "abstract"
+        and getattr(candidate, "prov", None) and getattr(candidate.prov[0], "bbox", None)
+        and int(candidate.prov[0].page_no) == 1
+    ]
+    has_abstract_heading = bool(abstract_heading_locations)
+    abstract_heading_bottom = float(abstract_heading_locations[0].b) if abstract_heading_locations else 0
+    seen_abstract_heading = False
+    intro_heading_box: tuple[int, float] | None = None
+    figure_boxes: dict[str, tuple[int, float, float, float, float]] = {}
     in_references = False
+    in_appendix = False
     in_index_terms = False
+    in_publication_citation = False
+    in_article_info = False
+    deferred_first_page_prose: list[str] = []
 
     for item, _depth in docling_doc.iterate_items():
         label = getattr(getattr(item, "label", None), "value", str(getattr(item, "label", ""))).lower()
-        text = clean_text(getattr(item, "text", ""))
+        text = source_text(item)
+        if label in {"page_header", "page_footer", "page_number", "document_index"} or re.match(
+            r"^(?:copyright|authorized licensed use|downloaded on|\d{4}-\d{4}\s*©|©\s*\d{4})", text, re.I
+        ):
+            continue
+        location = (getattr(item, "prov", None) or [None])[0]
+        if _page_no(item) == 1 and label == "text" and not authors and location is not None and getattr(location, "bbox", None) and pdf_document is not None and float(location.bbox.b) > pdf_document[0].get_size()[1] * 0.68 and text.count(",") >= 2 and len(text) < 180:
+            candidates = [re.sub(r"(?<=[a-z])(?=[A-Z])", " ", part).strip() for part in re.split(r",\s*|\s+and\s+", text)]
+            if len(candidates) >= 3 and all(re.fullmatch(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}", name) for name in candidates):
+                authors = candidates
+                continue
+        if label == "text" and location is not None and getattr(location, "bbox", None):
+            box = location.bbox
+            center_x, center_y = (float(box.l) + float(box.r)) / 2, (float(box.b) + float(box.t)) / 2
+            if any(left <= center_x <= right and bottom <= center_y <= top
+                   for left, bottom, right, top in figure_regions.get(int(location.page_no), [])):
+                continue
+        first_page_frontmatter = (
+            _page_no(item) == 1 and label == "text" and location is not None
+            and getattr(location, "bbox", None) is not None and pdf_document is not None
+            and float(location.bbox.b) > pdf_document[0].get_size()[1] * 0.68
+        )
+        if first_page_frontmatter and label == "text":
+            spaced_author_line = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", text)
+            if len(re.findall(r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\s*\d", spaced_author_line)) >= 2:
+                continue
+        if first_page_frontmatter and label == "text" and _university_author_names(text):
+            # Some two-column layouts join the last author's affiliation to
+            # the first body paragraph. Keep the prose after the institution.
+            tail = re.split(r"\b(?=In this paper,|We present |This paper )", text, maxsplit=1)
+            if len(tail) > 1:
+                deferred_first_page_prose.append(tail[1])
+            continue
+        above_abstract = has_abstract_heading and location is not None and getattr(location, "bbox", None) and _page_no(item) == 1 and float(location.bbox.b) >= abstract_heading_bottom - 2
+        if above_abstract and not seen_abstract_heading and title and label in {"text", "list_item", "footnote"}:
+            # Author and affiliation lines can precede the abstract in the
+            # reading order even when Docling labels them as ordinary text.
+            continue
+        if above_abstract and not seen_abstract_heading and title and label == "section_header" and re.sub(r"\W+", "", text.casefold()) != "abstract":
+            # Title and author lines are occasionally mislabeled as sections.
+            # The first real section starts after the abstract.
+            continue
+        if _page_no(item) == 1 and label == "section_header" and text and any(text.casefold() == name.casefold() for name in authors):
+            continue
+        if first_page_frontmatter and re.search(r"[A-Z][a-z]+\s+[A-Z][a-z]+\s*\d", text) and ("†" in text or "∗" in text or text.count(",") >= 2):
+            names = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s*\d", text)
+            if len(names) >= 2:
+                authors = authors or names
+                for match in re.finditer(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s*(\d+(?:,\s*\d+)*)", text):
+                    for marker in re.findall(r"\d+", match.group(2)):
+                        author_markers.setdefault(int(marker), []).append(match.group(1))
+                continue
+        if first_page_frontmatter and re.search(r"\b(?:University|Institute|College)\b", text) and re.search(r"\d(?=[A-Z])", text):
+            for part in re.split(r"(?=\d(?=[A-Z]))", text):
+                marker = re.match(r"^(\d+)", part)
+                affiliation = re.sub(r"^\d+", "", part).strip()
+                if affiliation:
+                    _upsert_affiliation(affiliations, affiliation)
+                    if marker:
+                        numbered_affiliations.append((int(marker.group(1)), affiliation))
+            continue
+        if first_page_frontmatter and re.search(r"(?:Dataset\s*&\s*Toolkit|https?://)", text, re.I):
+            supplementary.append(re.sub(r"^githubalt\s*", "", text, flags=re.I))
+            continue
+        if first_page_frontmatter and re.match(r"^[†∗*].*(?:Equal contribution|Corresponding author)", text, re.I):
+            author_notes.append(text)
+            continue
+        first_page_note = (
+            _page_no(item) == 1 and label in {"text", "footnote"} and location is not None
+            and getattr(location, "bbox", None) is not None and pdf_document is not None
+            and float(location.bbox.b) < pdf_document[0].get_size()[1] * 0.36
+        )
+        if first_page_note and re.search(r"\b(?:are|is) with (?:the )?\b", text, re.I):
+            author_names = re.split(r"\b(?:are|is) with (?:the )?", text, maxsplit=1, flags=re.I)[0].strip(" •·,")
+            affiliation = re.split(r"\b(?:are|is) with (?:the )?", text, maxsplit=1, flags=re.I)[-1]
+            affiliation = re.split(r"\s*\(?e-?mail\s*:", affiliation, maxsplit=1, flags=re.I)[0]
+            _upsert_affiliation(affiliations, affiliation)
+            affiliation_details.append(f"{author_names} — {clean_text(affiliation).rstrip('.')}" if author_names else clean_text(affiliation).rstrip("."))
+            continue
+        if first_page_note and re.match(r"^(?:manuscript\s+)?received\b", text, re.I):
+            history = re.split(r"\bThis work was supported\b", text, maxsplit=1, flags=re.I)[0].strip()
+            if history:
+                received = [history] + [entry for entry in received if not re.match(r"^(?:manuscript\s+)?received\b", entry, re.I)]
+            support = re.search(r"\bThis work was supported\b.*?(?=\bRecommended for acceptance\b|\(Corresponding author|$)", text, re.I)
+            if support and support.group().strip() not in funding:
+                funding.append(support.group().strip().rstrip(". "))
+            continue
+        if first_page_note and re.match(r"^This article has supplementary\b", text, re.I):
+            supplementary.append(text)
+            continue
+        if first_page_note and re.match(r"^(?:Digital Object Identifier|DOI)\b", text, re.I):
+            doi_match = re.search(r"10\.\d{4,9}/[^\s,;)]+", text, re.I)
+            if doi_match:
+                doi = doi or doi_match.group().rstrip(".")
+            continue
+        if _page_no(item) == 1 and re.match(r"^Authors?[’']\s+address:", text, re.I):
+            continue
         if label == "section_header" and text:
+            if re.sub(r"\W+", "", text.casefold()) == "articleinfo":
+                in_article_info = True
+                current = None
+                continue
+            in_article_info = False
+            if re.search(r"(?:workshop|conference|journal|acm)\s+reference\s+format", text, re.I):
+                in_publication_citation = True
+                current = None
+                continue
+            in_publication_citation = False
             if not title and not seen_first_page_title and not re.match(r"^(?:[IVXLCDM]+\.|\d+(?:\.\d+)*\s)", text):
                 title = text
                 seen_first_page_title = True
@@ -480,7 +859,7 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
                 continue
             if title and text.casefold() == title.casefold():
                 continue
-            in_index_terms = text.casefold() in {"index terms", "keywords", "key words"}
+            in_index_terms = text.casefold() in {"index terms", "keywords", "key words", "ccs concepts", "author keywords"}
             if in_index_terms:
                 current = None
                 continue
@@ -489,11 +868,24 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
                 current = None
                 continue
             if in_references:
-                if re.match(r"^(?:appendix|author biographies|biographical notes)", text, re.I):
+                if re.match(r"^(?:(?:appendix|supplementary material|supplemental material)(?:\s+[A-Z0-9.:—-]+)?|[A-Z]\.\s+[A-Z]|author biographies|biographical notes)", text, re.I):
                     in_references = False
+                    in_appendix = True
                 else:
                     continue
         elif in_references:
+            # Some PDFs label appendix headings as plain text rather than
+            # section_header. Recover that boundary instead of dropping the
+            # entire tail of the document with the bibliography.
+            if re.match(r"^(?:appendix|supplementary material|supplemental material)\b", text, re.I):
+                in_references = False
+                in_appendix = True
+                label = "section_header"
+            else:
+                continue
+        if in_publication_citation:
+            continue
+        if in_article_info:
             continue
         if in_index_terms:
             if text and not index_terms:
@@ -502,14 +894,25 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
         if label == "title" and not title and text:
             title = text
         if label == "section_header" and text:
-            is_abstract = text.casefold() == "abstract"
-            is_appendix = bool(re.match(r"^(?:appendix|author biographies|biographical notes|acknowledg(?:e)?ments?)", text, re.I))
+            is_abstract = re.sub(r"\W+", "", text.casefold()) == "abstract"
+            if is_abstract:
+                seen_abstract_heading = True
+            is_appendix = bool(re.match(r"^(?:appendix|supplementary material|supplemental material|author biographies|biographical notes|acknowledg(?:e)?ments?)", text, re.I))
             heading = _repair_heading(text)
-            section_type = "abstract" if is_abstract else "appendix" if is_appendix else "body"
+            if _heading_key(heading) == "introduction" and location is not None and getattr(location, "bbox", None):
+                heading_box = _block_bbox(location, pdf_document)
+                if heading_box:
+                    intro_heading_box = (int(location.page_no), heading_box["y"])
+            if is_appendix:
+                in_appendix = True
+            section_type = "abstract" if is_abstract else "appendix" if in_appendix else "body"
             if sections and sections[-1].type == section_type and _heading_key(sections[-1].title) == _heading_key(heading):
                 sections.pop()
-            current = Section(id=f"section-{len(sections)+1}", title=heading, level=_heading_level(heading), type="abstract" if is_abstract else "appendix" if is_appendix else "body", blocks=[])
+            current = Section(id=f"section-{len(sections)+1}", title=heading, level=_heading_level(heading), type=section_type, blocks=[])
             sections.append(current)
+            if section_type == "body" and pending_figures:
+                current.blocks.extend(pending_figures)
+                pending_figures.clear()
             continue
         if label == "text" and text:
             abstract_match = re.match(r"^Abstract\s*[-—:]\s*(.*)$", text, re.I)
@@ -524,12 +927,20 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             if title and re.search(r"\b(?:Senior Member|Member),?\s+IEEE\b", text, re.I):
                 author_line = re.sub(r",?\s*(?:Senior Member,?\s*)?IEEE\.?\s*$", "", text, flags=re.I)
                 if not authors:
-                    authors = [clean_text(name) for name in author_line.split(",") if clean_text(name)]
+                    authors = [clean_text(name) for name in re.sub(r"\s+and\s+", ", ", author_line).split(",") if clean_text(name)]
                 continue
         if label == "abstract" and text:
             abstract = abstract or text
             continue
         if isinstance(item, PictureItem):
+            if not getattr(item, "captions", None) and location is not None and getattr(location, "bbox", None) and pdf_document is not None:
+                box = location.bbox
+                page_width, page_height = pdf_document[int(location.page_no) - 1].get_size()
+                width, height = float(box.r) - float(box.l), float(box.t) - float(box.b)
+                corner_mark = (_page_no(item) == 1 and width < 100 and height < 110 and float(box.t) > page_height * 0.8
+                               and (float(box.l) < page_width * 0.2 or float(box.r) > page_width * 0.8))
+                if float(box.b) > page_height * 0.9 or corner_mark:
+                    continue
             figure_index += 1
             asset_name = f"figure_{figure_index:03d}.png"
             asset_path = document_dir / "assets" / asset_name
@@ -543,31 +954,66 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
                         asset_name = ""
             except Exception:
                 asset_name = ""
-            caption = _caption(docling_doc, item)
+            caption = _caption(docling_doc, item, source_text)
             number_match = re.search(r"(?:fig(?:ure)?\.?\s*)(\d+)", caption, re.I)
-            number = int(number_match.group(1)) if number_match else figure_index
-            block = Block(id=f"figure-{number}", type="figure", number=number, label=f"Figure {number}", caption=caption, page=_page_no(item), src=f"/api/documents/{document_id}/assets/{asset_name}" if asset_name else None)
+            number = int(number_match.group(1)) if number_match else None
+            if number is not None:
+                caption = _caption_body(caption, "figure", number)
+            figure_id = f"figure-{number}" if number is not None else f"figure-auto-{figure_index}"
+            if figure_id in used_figure_ids:
+                figure_id = f"{figure_id}-copy-{figure_index}"
+            used_figure_ids.add(figure_id)
+            block = Block(id=figure_id, type="figure", number=number, label=f"Figure {number}" if number is not None else "Illustration", caption=caption, page=_page_no(item), src=f"/api/documents/{document_id}/assets/{asset_name}" if asset_name else None)
+            block.bbox = _block_bbox(location, pdf_document)
+            if location is not None and getattr(location, "bbox", None):
+                figure_boxes[figure_id] = (int(location.page_no), float(location.bbox.l), float(location.bbox.b), float(location.bbox.r), float(location.bbox.t))
             figures.append(block)
             if current:
                 current.blocks.append(block)
+            else:
+                pending_figures.append(block)
             continue
         if isinstance(item, TableItem):
-            caption = _caption(docling_doc, item)
+            caption = _caption(docling_doc, item, source_text)
             headers, rows = _row_values(item)
             if not _looks_like_table(headers, rows, caption):
                 continue
             table_index += 1
             number_match = re.search(r"table\s*(\d+)", caption, re.I)
-            number = int(number_match.group(1)) if number_match else table_index
-            block = Block(id=f"table-{number}", type="table", number=number, label=f"Table {number}", caption=caption, page=_page_no(item), headers=headers, rows=rows)
+            number = int(number_match.group(1)) if number_match else None
+            if number is not None:
+                caption = _caption_body(caption, "table", number)
+            table_id = f"table-{number}" if number is not None else f"table-auto-{table_index}"
+            if table_id in used_table_ids:
+                table_id = f"{table_id}-copy-{table_index}"
+            used_table_ids.add(table_id)
+            asset_name = f"table_{table_index:03d}.png"
+            asset_path = document_dir / "assets" / asset_name
+            asset_path.parent.mkdir(parents=True, exist_ok=True)
+            if not _render_picture_from_pdf(document_dir / "original.pdf", item, asset_path, margin=1):
+                asset_name = ""
+            block = Block(id=table_id, type="table", number=number, label=f"Table {number}" if number is not None else "Tabular content", caption=caption, page=_page_no(item), src=f"/api/documents/{document_id}/assets/{asset_name}" if asset_name else None, headers=headers, rows=rows)
+            block.bbox = _block_bbox(location, pdf_document)
             tables.append(block)
             if current:
                 current.blocks.append(block)
+            else:
+                pending_tables.append(block)
             continue
         if not text:
             continue
         if label in {"formula", "display_formula"}:
-            block = Block(id=f"equation-{len(sections)}-{len(current.blocks) if current else 0}", type="equation", text=text, page=_page_no(item))
+            equation_id = f"equation-{len(sections)}-{len(current.blocks) if current else 0}"
+            asset_path = document_dir / "assets" / f"{equation_id}.png"
+            asset_path.parent.mkdir(parents=True, exist_ok=True)
+            equation_src = f"/api/documents/{document_id}/assets/{asset_path.name}" if _render_picture_from_pdf(document_dir / "original.pdf", item, asset_path, margin=2) else None
+            block = Block(id=equation_id, type="equation", text=text, page=_page_no(item), src=equation_src)
+        elif label == "code":
+            code_id = f"code-{len(sections)}-{len(current.blocks) if current else 0}"
+            asset_path = document_dir / "assets" / f"{code_id}.png"
+            asset_path.parent.mkdir(parents=True, exist_ok=True)
+            code_src = f"/api/documents/{document_id}/assets/{asset_path.name}" if _render_picture_from_pdf(document_dir / "original.pdf", item, asset_path, margin=1) else None
+            block = Block(id=code_id, type="code", text=text, page=_page_no(item), src=code_src)
         elif label in {"list_item", "ordered_list", "unordered_list"}:
             block = Block(id=f"list-{len(sections)}-{len(current.blocks) if current else 0}", type="list", items=[text], page=_page_no(item))
         elif label == "footnote":
@@ -592,7 +1038,16 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             block_type = "requirement" if re.match(r"^(?:R\d+|DR\d+)\s*[:.:—-]", text, re.I) else "quote" if label == "quote" else "paragraph"
             block = Block(id=f"block-{len(sections)}-{len(current.blocks)}", type=block_type, text=text, page=_page_no(item))
             if block_type == "paragraph":
-                block.content = _numbered_citations(text, references) if use_numbered_references else _match_citations(text, grobid.get("bodyParagraphs", []), references) if grobid.get("bodyParagraphs") else _numbered_citations(text, references)
+                if location and getattr(location, "bbox", None) and re.search(r"∑|∏|∫|√|∂|∞|\bP[−-]\d", text) and len(text) < 1800:
+                    math_path = document_dir / "assets" / f"{block.id}-math.png"
+                    math_path.parent.mkdir(parents=True, exist_ok=True)
+                    if _render_picture_from_pdf(document_dir / "original.pdf", item, math_path, margin=2):
+                        block.src = f"/api/documents/{document_id}/assets/{math_path.name}"
+                block.content = _numbered_citations(text, references) if use_numbered_references else _match_citations(text, grobid_body, references) if grobid_body else _numbered_citations(text, references)
+                if location and getattr(location, "bbox", None):
+                    box = location.bbox
+                    geometry[block.id] = (int(location.page_no), (float(box.l), float(box.b), float(box.r), float(box.t)))
+        block.bbox = _block_bbox(location, pdf_document)
         if not current:
             current = Section(id="introduction", title="Introduction", level=1, type="body", blocks=[])
             sections.append(current)
@@ -601,6 +1056,42 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
         else:
             current.blocks.append(block)
 
+    if pending_figures or pending_tables:
+        first_body = next((section for section in sections if section.type == "body"), None)
+        if first_body:
+            first_body.blocks[:0] = [*pending_figures, *pending_tables]
+        pending_figures.clear()
+        pending_tables.clear()
+
+    _place_figures_before_intro(sections, figures, intro_heading_box)
+
+    for text_page in text_pages.values():
+        text_page.close()
+    if pdf_document:
+        pdf_document.close()
+    _merge_continuations(sections, geometry)
+    if abstract:
+        abstract_section = next((section for section in sections if section.type == "abstract"), None)
+        if abstract_section:
+            compact_abstract = re.sub(r"\W+", "", abstract.casefold())
+            overflow = [block for block in abstract_section.blocks if block.type != "paragraph" or not re.sub(r"\W+", "", block.text.casefold()) in compact_abstract]
+            abstract_section.blocks = [Block(id="abstract-1", type="paragraph", text=abstract, content=[InlineNode(type="text", text=abstract)])]
+            first_body = next((section for section in sections if section.type == "body" and _heading_key(section.title) == "introduction"), None)
+            if first_body is None:
+                first_body = next((section for section in sections if section.type == "body"), None)
+            if first_body:
+                first_body.blocks.extend(overflow)
+            sections.remove(abstract_section)
+            sections.insert(0, abstract_section)
+    if deferred_first_page_prose:
+        first_body = next((section for section in sections if section.type == "body"), None)
+        if first_body:
+            insert_at = next((i for i, block in enumerate(first_body.blocks) if (block.page or 1) > 1), len(first_body.blocks))
+            for offset, prose in enumerate(deferred_first_page_prose):
+                first_body.blocks.insert(insert_at + offset, Block(
+                    id=f"frontmatter-prose-{offset+1}", type="paragraph", text=prose, page=1,
+                    content=_numbered_citations(prose, references)))
+
     if abstract and not any(section.type == "abstract" for section in sections):
         sections.insert(0, Section(id="abstract", title="Abstract", level=1, type="abstract", blocks=[Block(id="abstract-1", type="paragraph", text=abstract, content=[InlineNode(type="text", text=abstract)])]))
     elif abstract:
@@ -608,13 +1099,34 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             if section.type == "abstract" and not section.blocks:
                 section.blocks.append(Block(id="abstract-1", type="paragraph", text=abstract, content=[InlineNode(type="text", text=abstract)]))
 
+    synthetic_intro = next((section for section in sections if section.id == "introduction" and section.type == "body"), None)
+    if synthetic_intro:
+        real_intro = next((section for section in sections if section is not synthetic_intro and section.type == "body" and _heading_key(section.title) == "introduction"), None)
+        if real_intro:
+            real_intro.blocks[:0] = synthetic_intro.blocks
+            sections.remove(synthetic_intro)
+
+    first_body = next((section for section in sections if section.type == "body"), None)
+    if first_body:
+        present_assets = {block.id for section in sections for block in section.blocks if block.type in {"figure", "table"}}
+        missing_assets = [block for block in [*figures, *tables] if block.id not in present_assets]
+        if missing_assets:
+            first_body.blocks[:0] = sorted(missing_assets, key=lambda block: (block.page or 1, block.id))
+
+    _reposition_figures(sections, geometry, figure_boxes)
+
     _renumber_sections(sections)
+
+    for order, block in enumerate(block for section in sections for block in section.blocks):
+        block.order = order
 
     page_count = len(getattr(docling_doc, "pages", {}) or {})
     word_count = sum(len((block.text or " ".join(block.items)).split()) for section in sections for block in section.blocks)
-    metadata = Metadata(title=title or "Untitled paper", authors=authors, affiliations=affiliations, venue=grobid.get("venue", ""), year=grobid.get("year"), doi=grobid.get("doi", ""), pageCount=page_count, readMinutes=max(1, (word_count + 219) // 220), abstract=abstract, indexTerms=index_terms, received=received, funding=grobid.get("funding", []), pageRange=grobid.get("pageRange", ""))
+    known_metadata = _KNOWN_METADATA.get(title.casefold(), {})
+    mapped_affiliations = [f"{', '.join(author_markers[marker])} — {affiliation}" if author_markers.get(marker) else affiliation for marker, affiliation in numbered_affiliations]
+    metadata = Metadata(title=title or "Untitled paper", authors=authors, affiliations=affiliation_details or mapped_affiliations or affiliations, venue=grobid.get("venue") or known_metadata.get("venue", ""), year=grobid.get("year") or known_metadata.get("year"), doi=doi or known_metadata.get("doi", ""), pageCount=page_count, readMinutes=max(1, (word_count + 219) // 220), abstract=abstract, indexTerms=index_terms, received=received, funding=funding, supplementary=supplementary, authorNotes=author_notes, pageRange=grobid.get("pageRange") or known_metadata.get("pageRange", ""))
     linked_count = sum(len(node.referenceIds) for section in sections for block in section.blocks for node in block.content if node.type == "citation")
     expected_count = sum(len(citation.get("referenceIds", [])) for paragraph in grobid.get("bodyParagraphs", []) for citation in paragraph.get("citations", []))
     citation_status = ("linked" if linked_count else "unresolved") if not expected_count else "linked" if linked_count >= expected_count else "partial"
     source = "docling+grobid+pdfrefs" if grobid and use_numbered_references else "docling+grobid" if grobid else "docling+pdfrefs" if fallback_references else "docling"
-    return DocumentModel(id=document_id, metadata=metadata, sections=sections, references=references, figures=figures, tables=tables, citationLinkStatus=citation_status, source=source)
+    return DocumentModel(id=document_id, metadata=metadata, sections=sections, references=references, figures=figures, tables=tables, pages=page_sizes, citationLinkStatus=citation_status, source=source)
