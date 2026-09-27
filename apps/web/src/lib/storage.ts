@@ -1,8 +1,9 @@
 import type {Annotation, DocumentModel} from './document';
 
 export type SavedDocument = {id: string; document: DocumentModel; filename: string; savedAt: number; pdf?: Blob; serverId?: string};
+export type ReadingProgress = {id: string; percent: number; blockId?: string; updatedAt: number};
 const DB_NAME = 'paperlight-v2';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -14,13 +15,14 @@ function openDatabase(): Promise<IDBDatabase> {
         const store = db.createObjectStore('annotations', {keyPath: 'id'});
         store.createIndex('documentId', 'documentId');
       }
+      if (!db.objectStoreNames.contains('readingProgress')) db.createObjectStore('readingProgress', {keyPath: 'id'});
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
 }
 
-async function request<T>(storeName: 'documents' | 'annotations', mode: IDBTransactionMode, run: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+async function request<T>(storeName: 'documents' | 'annotations' | 'readingProgress', mode: IDBTransactionMode, run: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(storeName, mode);
@@ -39,6 +41,8 @@ export const listDocuments = () => request<SavedDocument[]>('documents', 'readon
 export const saveAnnotation = (entry: Annotation) => request('annotations', 'readwrite', store => store.put(entry));
 export const deleteAnnotation = (id: string) => request('annotations', 'readwrite', store => store.delete(id));
 export const listAnnotations = (documentId: string) => request<Annotation[]>('annotations', 'readonly', store => store.index('documentId').getAll(documentId));
+export const saveProgress = (entry: ReadingProgress) => request('readingProgress', 'readwrite', store => store.put(entry));
+export const getProgress = (id: string) => request<ReadingProgress | undefined>('readingProgress', 'readonly', store => store.get(id));
 
 export async function fingerprint(file: File): Promise<string> {
   const bytes = await file.arrayBuffer();

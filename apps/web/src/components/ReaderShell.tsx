@@ -6,7 +6,7 @@ import demo from '@/data/demo.json';
 import type {Annotation, AreaAnchor, DocumentModel} from '@/lib/document';
 import {allBlocks, DOCUMENT_MODEL_VERSION, isTextAnchor, resolveAssetSources} from '@/lib/document';
 import {captureAnchor, renderTextHighlights, resolveAnchor} from '@/lib/anchors';
-import {deleteAnnotation, fingerprint, getDocument, listAnnotations, listDocuments, saveAnnotation, saveDocument, type SavedDocument} from '@/lib/storage';
+import {deleteAnnotation, fingerprint, getDocument, getProgress, listAnnotations, listDocuments, saveAnnotation, saveDocument, saveProgress, type SavedDocument} from '@/lib/storage';
 import {useAnnotationUI, useLayout, usePreferences, type RightPanel, type Tool} from '@/lib/stores';
 
 const SAMPLE = resolveAssetSources(demo as DocumentModel);
@@ -70,26 +70,44 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   useEffect(() => {
     const root = articleRef.current;
     if (!root) return;
-    let saved = 0;
-    try {saved = Math.max(0, Math.min(100, Number(localStorage.getItem(`paperlight-progress-${localId}`)) || 0));} catch {}
-    const frame = requestAnimationFrame(() => {
-      root.scrollTop = (root.scrollHeight - root.clientHeight) * saved / 100;
-      setProgress(saved);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [paper, localId]);
-  useEffect(() => {
-    const root = articleRef.current;
-    if (!root) return;
+    let cancelled = false;
+    let restored = false;
+    let frame = 0;
+    let lastStored = -1;
+    const legacyKey = `paperlight-progress-${localId}`;
+    const restore = async () => {
+      let saved: number | undefined;
+      try {saved = (await getProgress(localId))?.percent;} catch {}
+      if (saved === undefined) {
+        try {saved = Number(localStorage.getItem(legacyKey)) || 0;} catch {saved = 0;}
+        if (!cancelled) void saveProgress({id: localId, percent: saved, updatedAt: Date.now()}).catch(() => {});
+      }
+      if (cancelled) return;
+      saved = Math.max(0, Math.min(100, saved));
+      frame = requestAnimationFrame(() => {
+        root.scrollTop = (root.scrollHeight - root.clientHeight) * saved / 100;
+        setProgress(saved);
+        lastStored = saved;
+        restored = true;
+      });
+    };
     const onScroll = () => {
+      if (!restored) return;
       const height = root.scrollHeight - root.clientHeight;
       const next = height > 0 ? Math.round(root.scrollTop / height * 100) : 0;
       setProgress(next);
-      try {localStorage.setItem(`paperlight-progress-${localId}`, String(next));} catch {}
+      if (next === lastStored) return;
+      lastStored = next;
+      const top = root.getBoundingClientRect().top + 24;
+      const blockId = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.getBoundingClientRect().bottom > top)?.dataset.blockId;
+      void saveProgress({id: localId, percent: next, blockId, updatedAt: Date.now()}).catch(() => {
+        try {localStorage.setItem(legacyKey, String(next));} catch {}
+      });
     };
     root.addEventListener('scroll', onScroll, {passive: true});
-    return () => root.removeEventListener('scroll', onScroll);
-  }, [localId]);
+    void restore();
+    return () => {cancelled = true; cancelAnimationFrame(frame); root.removeEventListener('scroll', onScroll);};
+  }, [paper, localId]);
 
   const openDocument = useCallback(async (document: DocumentModel, id: string, remote?: string) => {
     setPaper(resolveAssetSources(document, remote)); setLocalId(id); setServerId(remote);
