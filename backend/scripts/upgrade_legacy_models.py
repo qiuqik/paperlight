@@ -16,7 +16,7 @@ from pathlib import Path
 from docling_core.types.doc import DoclingDocument
 
 from backend.app.model import DOCUMENT_MODEL_VERSION
-from backend.app.normalizer import extract_pdf_references, normalize_docling, parse_grobid
+from backend.app.normalizer import _block_bbox, clean_text, extract_pdf_references, normalize_docling, parse_grobid
 
 
 def _blocks(model: dict) -> dict[str, dict]:
@@ -71,7 +71,78 @@ def _check_compatibility(old: dict, new: dict, annotations: list[dict]) -> None:
                     raise ValueError("Cross-block annotation order changed")
 
 
-def upgrade(folder: Path, backup_root: Path | None) -> dict:
+def _merge_geometry(old: dict, new: dict, docling_document=None, pdf_document=None) -> dict:
+    """Keep legacy content and IDs, copying only unambiguous PDF positions."""
+    before, after = _blocks(old), _blocks(new)
+    by_signature: dict[tuple, list[dict]] = {}
+
+    def signature(block: dict) -> tuple:
+        return (block.get("type"), block.get("text", ""),
+                block.get("number"), block.get("caption", ""))
+
+    for block in after.values():
+        if block.get("bbox"):
+            by_signature.setdefault(signature(block), []).append(block)
+    old_occurrences: dict[tuple, int] = {}
+    for block in before.values():
+        key = (signature(block), block.get("page"))
+        old_occurrences[key] = old_occurrences.get(key, 0) + 1
+    matched = 0
+    for order, block in enumerate(block for section in old.get("sections", []) for block in section.get("blocks", [])):
+        block["order"] = order
+        if block.get("bbox"):
+            continue
+        if old_occurrences[(signature(block), block.get("page"))] != 1:
+            continue
+        candidates = by_signature.get(signature(block), [])
+        same_page = [item for item in candidates if item.get("page") == block.get("page")]
+        if same_page:
+            candidates = same_page
+        if len(candidates) != 1:
+            continue
+        candidate = candidates[0]
+        block["bbox"] = candidate["bbox"]
+        block["page"] = block.get("page") or candidate.get("page")
+        matched += 1
+    raw_matched = 0
+    if docling_document is not None and pdf_document is not None:
+        raw_positions: dict[tuple[str, int], list[dict]] = {}
+        for item, _depth in docling_document.iterate_items():
+            provenance = getattr(item, "prov", None) or []
+            if not provenance:
+                continue
+            location = provenance[0]
+            page = getattr(location, "page_no", None)
+            text = clean_text(getattr(item, "text", ""))
+            box = _block_bbox(location, pdf_document)
+            if text and page and box:
+                raw_positions.setdefault((text, int(page)), []).append(box)
+        for block in before.values():
+            if block.get("bbox") or block.get("type") not in {"paragraph", "quote", "footnote", "requirement", "code"}:
+                continue
+            if old_occurrences[(signature(block), block.get("page"))] != 1:
+                continue
+            text = clean_text(block.get("text", ""))
+            candidates = raw_positions.get((text, block.get("page")), [])
+            if len(candidates) == 1:
+                block["bbox"] = candidates[0]
+                raw_matched += 1
+    if not old.get("pages"):
+        old["pages"] = new.get("pages", [])
+    for collection in ("figures", "tables"):
+        for block in old.get(collection, []):
+            source = before.get(block.get("id"))
+            if source:
+                for key in ("page", "bbox", "order"):
+                    if key in source:
+                        block[key] = source[key]
+    return {"matched": matched, "rawMatched": raw_matched, "blocks": len(before),
+            "missingBbox": sum(not block.get("bbox") for block in before.values()),
+            "figuresMissingBbox": sum(block.get("type") == "figure" and not block.get("bbox")
+                                      for block in before.values())}
+
+
+def upgrade(folder: Path, backup_root: Path | None, geometry_only: bool = False) -> dict:
     path = folder / "document.json"
     old = json.loads(path.read_text(encoding="utf-8"))
     old_blocks = _blocks(old)
@@ -94,10 +165,21 @@ def upgrade(folder: Path, backup_root: Path | None) -> dict:
         status = json.loads((folder / "status.json").read_text(encoding="utf-8"))
         model.fingerprint = old.get("fingerprint") or status.get("fingerprint", "")
         new = model.model_dump(mode="json")
-        _check_compatibility(old, new, annotations)
-        blocks = _blocks(new)
-        report = {"id": folder.name[:8], "status": "ready-to-upgrade", "blocks": len(blocks),
-                  "missingBbox": sum(not block.get("bbox") for block in blocks.values()),
+        if geometry_only:
+            import pypdfium2 as pdfium
+            pdf_document = pdfium.PdfDocument(str(stage / "original.pdf"))
+            try:
+                geometry_report = _merge_geometry(old, new, document, pdf_document)
+            finally:
+                pdf_document.close()
+            replacement = old
+        else:
+            _check_compatibility(old, new, annotations)
+            replacement = new
+            blocks = _blocks(new)
+            geometry_report = {"blocks": len(blocks),
+                               "missingBbox": sum(not block.get("bbox") for block in blocks.values())}
+        report = {"id": folder.name[:8], "status": "ready-to-upgrade", **geometry_report,
                   "annotations": len(annotations)}
         if backup_root is None:
             return report
@@ -107,7 +189,7 @@ def upgrade(folder: Path, backup_root: Path | None) -> dict:
         backup.mkdir(parents=True)
         shutil.copy2(path, backup / "document.json")
         staged_assets = stage / "assets"
-        if staged_assets.is_dir():
+        if not geometry_only and staged_assets.is_dir():
             for asset in staged_assets.iterdir():
                 destination = folder / "assets" / asset.name
                 if destination.exists():
@@ -116,7 +198,7 @@ def upgrade(folder: Path, backup_root: Path | None) -> dict:
                 destination.parent.mkdir(exist_ok=True)
                 shutil.copy2(asset, destination)
         temporary_json = folder / "document.upgrade.tmp"
-        temporary_json.write_text(json.dumps(new, ensure_ascii=False), encoding="utf-8")
+        temporary_json.write_text(json.dumps(replacement, ensure_ascii=False), encoding="utf-8")
         temporary_json.replace(path)
         report["status"] = "upgraded"
         return report
@@ -127,6 +209,7 @@ def main() -> None:
     parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--backup-dir", type=Path, help="Apply upgrades and save original files here")
     parser.add_argument("--id", action="append", default=[], help="Process only this document ID or unique prefix")
+    parser.add_argument("--geometry-only", action="store_true", help="Keep legacy text, IDs, and order; add only proven positions")
     args = parser.parse_args()
     if args.backup_dir and args.backup_dir.resolve().is_relative_to(args.data_dir.resolve()):
         parser.error("Backup directory must be outside the document data directory")
@@ -136,7 +219,7 @@ def main() -> None:
         if args.id and not any(folder.name.startswith(prefix) for prefix in args.id):
             continue
         try:
-            print(json.dumps(upgrade(folder, args.backup_dir)))
+            print(json.dumps(upgrade(folder, args.backup_dir, args.geometry_only)))
         except Exception as exc:
             print(json.dumps({"id": folder.name[:8], "status": "skipped", "reason": str(exc)}))
 
