@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from backend.scripts.upgrade_legacy_models import _check_compatibility, _merge_geometry
+from backend.scripts.upgrade_legacy_models import _add_anchored_equations, _check_compatibility, _merge_geometry
 
 
 def model(*blocks):
@@ -71,6 +71,34 @@ class ModelUpgradeTests(unittest.TestCase):
         report = _merge_geometry(old, new)
         self.assertEqual(report["matched"], 0)
         self.assertEqual(report["missingBbox"], 2)
+
+    def test_equation_is_inserted_between_exact_neighbors(self) -> None:
+        old = {"sections": [{"id": "method", "title": "Method", "type": "body", "blocks": [
+            {"id": "p1", "type": "paragraph", "text": "Before", "page": 2},
+            {"id": "p2", "type": "paragraph", "text": "After", "page": 2}]}]}
+        equation = {"id": "equation-1", "type": "equation", "text": "", "page": 2,
+                    "bbox": {"x": 1, "y": 2, "width": 3, "height": 4}, "src": "/api/documents/abc/assets/equation-1.png"}
+        new = {"sections": [{"id": "method", "title": "Method", "type": "body", "blocks": [
+            {"id": "shifted-1", "type": "paragraph", "text": "Before", "page": 2},
+            equation,
+            {"id": "shifted-2", "type": "paragraph", "text": "After", "page": 2}]}]}
+        assets, unplaced, reasons = _add_anchored_equations(old, new)
+        self.assertEqual(assets, ["equation-1.png"])
+        self.assertEqual(unplaced, 0)
+        self.assertEqual(reasons, {})
+        self.assertEqual([block["id"] for block in old["sections"][0]["blocks"]],
+                         ["p1", "equation-1", "p2"])
+
+    def test_equation_without_both_neighbors_is_skipped(self) -> None:
+        old = model({"id": "p1", "type": "paragraph", "text": "After", "page": 2})
+        new = model({"id": "eq", "type": "equation", "page": 2,
+                     "bbox": {"x": 1, "y": 2, "width": 3, "height": 4},
+                     "src": "/api/documents/abc/assets/eq.png"},
+                    {"id": "p2", "type": "paragraph", "text": "After", "page": 2})
+        assets, unplaced, reasons = _add_anchored_equations(old, new)
+        self.assertEqual(assets, [])
+        self.assertEqual(unplaced, 1)
+        self.assertEqual(reasons, {"incomplete-anchors": 1})
 
 
 if __name__ == "__main__":
