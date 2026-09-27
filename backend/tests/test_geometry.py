@@ -9,10 +9,33 @@ from types import ModuleType
 from unittest.mock import patch
 
 from backend.app.model import Block, Section
-from backend.app.normalizer import _block_bbox, _place_figures_before_intro, _reposition_figures, normalize_docling
+from backend.app.normalizer import _block_bbox, _heading_key, _place_figures_before_intro, _repair_heading, _reposition_figures, extract_pdf_references, normalize_docling
 
 
 class GeometryTests(unittest.TestCase):
+    def test_joined_section_number_matches_normal_heading(self) -> None:
+        self.assertEqual(_repair_heading("1Introduction"), "1 Introduction")
+        self.assertEqual(_repair_heading("2RELATED WORK"), "2 RELATED WORK")
+        self.assertEqual(_heading_key("1Introduction"), _heading_key("Introduction"))
+
+    def test_repeated_bibliography_numbers_and_appendix_are_excluded(self) -> None:
+        page_text = ("REFERENCES\n[1] A. Author. A useful paper. 2020.\n"
+                     "[2] B. Author. Another useful paper. 2021.\n"
+                     "[1] A. Author. A useful paper. 2020.\n"
+                     "[2] B. Author. Another useful paper. 2021.\n"
+                     "APPENDIX A\n[1] This appendix item is not a reference.\n")
+        class FakePdf:
+            def __len__(self): return 1
+            def __getitem__(self, index):
+                return SimpleNamespace(get_textpage=lambda: SimpleNamespace(get_text_range=lambda: page_text))
+            def close(self): pass
+        pdfium = ModuleType("pypdfium2")
+        pdfium.PdfDocument = lambda path: FakePdf()
+        with patch.dict(sys.modules, {"pypdfium2": pdfium}):
+            references = extract_pdf_references(Path("unused.pdf"))
+        self.assertEqual([entry["number"] for entry in references], [1, 2])
+        self.assertTrue(all("appendix item" not in entry["preview"].lower() for entry in references))
+
     def test_bbox_uses_top_left_origin(self) -> None:
         pdf = [SimpleNamespace(get_size=lambda: (600, 800))]
         location = SimpleNamespace(page_no=1, bbox=SimpleNamespace(l=10, b=650, r=200, t=750, coord_origin="BOTTOMLEFT"))

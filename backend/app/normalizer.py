@@ -461,6 +461,8 @@ def _heading_level(text: str) -> int:
 
 
 def _repair_heading(text: str) -> str:
+    # PDF extraction often joins a section number and its title ("1Introduction").
+    text = re.sub(r"^(\d+(?:\.\d+)*)(?=(?:[A-Z][a-z]|[A-Z]{3,}))", r"\1 ", text)
     text = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", text)
     # PDF text extraction often drops the word space in IEEE-style all-caps
     # headings while preserving the section marker.
@@ -543,6 +545,7 @@ def extract_pdf_references(pdf_path: Path) -> list[dict[str, Any]]:
     source = source[heading.end():]
     # IEEE author biographies follow the bibliography without a heading.
     source = re.split(r"(?im)^\s*[A-Z][a-z]+\s+[A-Z][a-z]+\s+(?:received|is currently|is a|was a)\b", source, maxsplit=1)[0]
+    source = re.split(r"(?im)^\s*(?:appendix(?:\s+[A-Z0-9.:—-]+)?|supplementary material|supplemental material)\s*$", source, maxsplit=1)[0]
     starts = list(re.finditer(r"(?m)^\s*\[(\d+)\]\s*", source))
     entries = []
     for index, match in enumerate(starts):
@@ -568,7 +571,13 @@ def extract_pdf_references(pdf_path: Path) -> list[dict[str, Any]]:
             "url": url_match.group().rstrip(".,)") if url_match else "",
             "preview": raw,
         })
-    return entries
+    unique: dict[int, dict[str, Any]] = {}
+    for entry in entries:
+        number = entry["number"]
+        previous = unique.get(number)
+        if previous is None or (len(previous["preview"]) > 1200 and len(entry["preview"]) <= 1200):
+            unique[number] = entry
+    return sorted(unique.values(), key=lambda entry: entry["number"])
 
 
 def _numbered_citations(text: str, references: list[Reference]) -> list[InlineNode]:
