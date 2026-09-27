@@ -25,6 +25,10 @@ const PARSE_STAGE_LABELS: Record<string, string> = {
   recognizing_scanned_pages: '识别扫描页面', linking_references: '关联参考文献',
   normalizing_document: '整理图表与公式', ready: '解析完成', failed: '解析失败',
 };
+function annotationTime(item: Annotation): number {
+  const value = item.updatedAt || item.createdAt || 0;
+  return value < 1e11 ? value * 1000 : value;
+}
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function waitForDocument(state: ParserState, onProgress: (message: string) => void): Promise<ParserState & {document: DocumentModel}> {
   for (let tries = 0; tries < 360 && state.status === 'processing'; tries++) {
@@ -63,7 +67,6 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const annotationUI = useAnnotationUI();
 
   useEffect(() => {void usePreferences.persist.rehydrate();}, []);
-  useEffect(() => {const timers = noteSyncTimers.current; return () => {for (const timer of timers.values()) clearTimeout(timer);};}, []);
   useEffect(() => {
     if (initialId) return;
     void listAnnotations(SAMPLE.id).then(setAnnotations).catch(() => {});
@@ -121,9 +124,16 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     if (documentKey !== id) {
       try {
         const legacy = await listAnnotations(id);
-        const savedIds = new Set(saved.map(item => item.id));
-        for (const item of legacy) if (!savedIds.has(item.id)) await saveAnnotation({...item, documentId: documentKey});
-        saved = [...new Map([...legacy, ...saved].map(item => [item.id, {...item, documentId: documentKey}])).values()];
+        const merged = new Map(saved.map(item => [item.id, item]));
+        for (const item of legacy) {
+          const current = merged.get(item.id);
+          if (!current || annotationTime(item) > annotationTime(current)) {
+            const moved = {...item, documentId: documentKey};
+            await saveAnnotation(moved);
+            merged.set(item.id, moved);
+          }
+        }
+        saved = [...merged.values()];
         const [currentProgress, legacyProgress] = await Promise.all([getProgress(documentKey), getProgress(id)]);
         if (legacyProgress && (!currentProgress || legacyProgress.updatedAt > currentProgress.updatedAt)) {
           await saveProgress({...legacyProgress, id: documentKey});
@@ -140,8 +150,18 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
             const anchor = {start: {blockId: item.blockId || '', offset: item.start || 0}, end: {blockId: item.blockId || '', offset: item.end || 0}, quote: item.quote || '', prefix: '', suffix: ''};
             return {...item, type: item.note ? 'note' : item.mode === 'underline' ? 'underline' : 'highlight', anchor} as Annotation;
           });
-          for (const item of remoteAnnotations) if (item.anchor) {await saveAnnotation({...item, documentId: documentKey});}
-          saved = [...new Map([...saved, ...remoteAnnotations.filter(item => item.anchor)].map(item => [item.id, {...item, documentId: documentKey}])).values()];
+          const merged = new Map(saved.map(item => [item.id, item]));
+          for (const item of remoteAnnotations) {
+            if (!item.anchor) continue;
+            const current = merged.get(item.id);
+            const preserveUnsyncedNote = !!current?.note && !item.note && !item.updatedAt;
+            if (!current || (!preserveUnsyncedNote && annotationTime(item) > annotationTime(current))) {
+              const incoming = {...item, documentId: documentKey};
+              await saveAnnotation(incoming);
+              merged.set(item.id, incoming);
+            }
+          }
+          saved = [...merged.values()];
         }
       } catch {}
     }
@@ -174,14 +194,19 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     if (record.type === 'note') {setLayout({rightPanel: 'notes', rightOpen: true}); setNoteFocusId(record.id);}
   }, [serverId, setLayout]);
 
+  const syncNote = (annotationId: string, note: string, remote: string) => {
+    void fetch(`/api/parser/api/documents/${remote}/annotations/${annotationId}`, {method: 'PATCH', headers: {'content-type': 'application/json'}, body: JSON.stringify({note})})
+      .then(response => {if (!response.ok) throw new Error('Server note sync failed');})
+      .catch(() => setImportStatus('笔记仅保存在此浏览器，服务器同步失败'));
+  };
   const updateNote = async (record: Annotation, note: string) => {
-    const changed = {...record, note};
+    const changed = {...record, note, updatedAt: Date.now()};
     setAnnotations(current => current.map(item => item.id === record.id ? changed : item));
-    await saveAnnotation(changed);
+    try {await saveAnnotation(changed);} catch {setImportStatus('笔记未能保存到浏览器');}
     const prior = noteSyncTimers.current.get(record.id);
     if (prior) clearTimeout(prior);
     if (serverId) noteSyncTimers.current.set(record.id, setTimeout(() => {
-      void fetch(`/api/parser/api/documents/${serverId}/annotations/${record.id}`, {method: 'PATCH', headers: {'content-type': 'application/json'}, body: JSON.stringify({note})}).catch(() => {});
+      syncNote(record.id, note, serverId);
       noteSyncTimers.current.delete(record.id);
     }, 400));
   };
@@ -301,7 +326,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
         {layout.rightPanel === 'references' && (paper.references.length ? paper.references.map(ref => <div className="reference-card" id={`ref-${ref.id}`} key={ref.id}><small>[{ref.number}] {ref.authors}</small><strong>{ref.title}</strong><span>{ref.venue} {ref.year}</span>{ref.preview && <p>{ref.preview}</p>}</div>) : <p className="empty-panel">暂无参考文献</p>)}
         {layout.rightPanel === 'figures' && (paper.figures.length ? paper.figures.map(item => <button className="asset-card" key={item.id} onClick={() => document.getElementById(item.id)?.scrollIntoView({behavior: 'smooth', block: 'center'})}>{item.src && <img src={item.src} alt="" />}<strong>{item.label || `Figure ${item.number}`}</strong><span>{item.caption}</span></button>) : <p className="empty-panel">暂无图片</p>)}
         {layout.rightPanel === 'tables' && (paper.tables.length ? paper.tables.map(item => <button className="asset-card" key={item.id} onClick={() => document.getElementById(item.id)?.scrollIntoView({behavior: 'smooth', block: 'center'})}><strong>{item.label || `Table ${item.number}`}</strong><span>{item.caption}</span></button>) : <p className="empty-panel">暂无表格</p>)}
-        {layout.rightPanel === 'notes' && (annotations.length ? annotations.map(item => <div className="note-card" key={item.id} style={{borderColor: item.color, background: `${item.color}18`}}><button className="note-quote" onClick={() => jumpToAnnotation(item)}>{isTextAnchor(item.anchor) ? `“${item.anchor.quote}”` : `第 ${item.anchor.page} 页区域`}</button>{(item.type === 'note' || !!item.note || openNoteEditors.has(item.id)) && <textarea aria-label="笔记内容" placeholder="输入笔记…" value={item.note || ''} autoFocus={noteFocusId === item.id} onFocus={() => setNoteFocusId(null)} onChange={event => void updateNote(item, event.target.value)} />}<div className="note-footer"><span>{item.type}</span>{item.type !== 'note' && !item.note && !openNoteEditors.has(item.id) && <button onClick={() => {setOpenNoteEditors(current => new Set(current).add(item.id)); setNoteFocusId(item.id);}}>添加笔记</button>}<button onClick={() => void removeAnnotation(item)}>删除</button></div></div>) : <p className="empty-panel">选择文字后，笔记和标注会出现在这里。</p>)}
+        {layout.rightPanel === 'notes' && (annotations.length ? annotations.map(item => <div className="note-card" key={item.id} style={{borderColor: item.color, background: `${item.color}18`}}><button className="note-quote" onClick={() => jumpToAnnotation(item)}>{isTextAnchor(item.anchor) ? `“${item.anchor.quote}”` : `第 ${item.anchor.page} 页区域`}</button>{(item.type === 'note' || !!item.note || openNoteEditors.has(item.id)) && <textarea aria-label="笔记内容" placeholder="输入笔记…" value={item.note || ''} autoFocus={noteFocusId === item.id} onFocus={() => setNoteFocusId(null)} onChange={event => void updateNote(item, event.target.value)} onBlur={event => {const timer = noteSyncTimers.current.get(item.id); if (timer && serverId) {clearTimeout(timer); noteSyncTimers.current.delete(item.id); syncNote(item.id, event.currentTarget.value, serverId);}}} />}<div className="note-footer"><span>{item.type}</span>{item.type !== 'note' && !item.note && !openNoteEditors.has(item.id) && <button onClick={() => {setOpenNoteEditors(current => new Set(current).add(item.id)); setNoteFocusId(item.id);}}>添加笔记</button>}<button onClick={() => void removeAnnotation(item)}>删除</button></div></div>) : <p className="empty-panel">选择文字后，笔记和标注会出现在这里。</p>)}
       </div></aside></div>
     {layout.settingsOpen && <div className="drawer-backdrop" onClick={() => layout.set({settingsOpen: false})}><aside className="settings-drawer" onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>阅读设置</h2><button aria-label="关闭设置" onClick={() => layout.set({settingsOpen: false})}><X size={20} /></button></div><label>字体<select value={prefs.fontFamily} onChange={event => prefs.set({fontFamily: event.target.value})}><option value="Georgia, serif">Georgia</option><option value="Arial, sans-serif">Arial</option><option value="'Times New Roman', serif">Times New Roman</option></select></label><label>字号 <b>{prefs.fontSize}px</b><input type="range" min="14" max="26" value={prefs.fontSize} onChange={event => prefs.set({fontSize: Number(event.target.value)})} /></label><label>行距 <b>{prefs.lineHeight.toFixed(1)}</b><input type="range" min="1.2" max="2.2" step="0.1" value={prefs.lineHeight} onChange={event => prefs.set({lineHeight: Number(event.target.value)})} /></label><label>阅读宽度 <b>{prefs.contentWidth}px</b><input type="range" min="600" max="1200" step="20" value={prefs.contentWidth} onChange={event => prefs.set({contentWidth: Number(event.target.value)})} /></label><label>主题<select value={prefs.theme} onChange={event => prefs.set({theme: event.target.value as typeof prefs.theme})}><option value="paper">纸张</option><option value="warm">暖色</option><option value="dark">深色</option><option value="custom">自定义</option></select></label>{prefs.theme === 'custom' && <div className="custom-theme-colors">{([['customApp', '界面背景'], ['customPaper', '纸张背景'], ['customText', '正文文字'], ['customAccent', '强调色']] as const).map(([key, label]) => <label key={key}>{label}<input type="color" value={prefs[key]} onChange={event => prefs.set({[key]: event.target.value})} /></label>)}</div>}<label>工具栏位置<select value={prefs.toolbarDock} onChange={event => prefs.set({toolbarDock: event.target.value as typeof prefs.toolbarDock})}><option value="top">顶部</option><option value="bottom">底部</option><option value="left">左侧</option><option value="right">右侧</option></select></label><label className="check-row"><input type="checkbox" checked={cachePdf} onChange={event => setCachePdf(event.target.checked)} />新导入时在此浏览器缓存 PDF</label></aside></div>}
     {layout.historyOpen && <div className="dialog-backdrop" onClick={() => layout.set({historyOpen: false})}><section className="history-dialog" onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>历史记录</h2><button aria-label="关闭历史记录" onClick={() => layout.set({historyOpen: false})}><X size={20} /></button></div><div className="history-tabs"><button className={historySource === 'local' ? 'active' : ''} onClick={() => void openHistory('local')}>此浏览器</button><button className={historySource === 'server' ? 'active' : ''} onClick={() => void openHistory('server')}>服务器</button></div><div className="history-list">{historySource === 'local' ? (localHistory.length ? localHistory.map(item => <button key={item.id} onClick={() => void openDocument(item.document, item.id, item.serverId)}><strong>{item.document.metadata.title}</strong><small>{item.filename} · {item.document.metadata.pageCount} 页</small></button>) : <p className="empty-panel">此浏览器还没有导入的论文。</p>) : <>
