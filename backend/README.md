@@ -1,26 +1,34 @@
-# Paperlight local document API
+# Paperlight parser API
 
-The static Sites deployment cannot run Python parsing workers. This optional local API implements the planned PDF → Docling/GROBID → normalized `DocumentModel` flow while preserving the hosted reader as the frontend. OCR runs automatically only when Docling finds a mostly empty text layer; set `PAPERLIGHT_OCR_MODE=always` or `never` to override this behavior.
+The parser runs inside the root Docker Compose stack and is reached through the Next.js `/api/parser` proxy. It converts PDF → Docling/GROBID → normalized `DocumentModel`. OCR runs automatically only when Docling finds a mostly empty text layer; set `PAPERLIGHT_OCR_MODE=always` or `never` to override this behavior.
 
-## Start with Docker on Windows
+## Start the full stack on Windows
 
-Install Docker Desktop with its WSL 2 backend. In PowerShell, from the `backend` directory:
+Install Docker Desktop with its WSL 2 backend. From the repository root:
+
+```powershell
+docker compose up --build -d
+docker compose logs parser
+```
+
+The Web app listens on `127.0.0.1:8040`. The parser and GROBID have no host ports; the Web app forwards same-origin requests to the parser inside Compose. Source PDFs, parsed assets, history, and notes persist in `userdata/documents/`; Docling models persist in a Docker volume. The Docker image installs CPU-only PyTorch and torchvision, and Compose uses GROBID's smaller CPU/CRF image.
+
+For local frontend development only, `backend/docker-compose.yml` can start the parser separately on `127.0.0.1:8000`. Stop the root Compose services before using it, then run these commands from the `backend` directory:
 
 ```powershell
 Copy-Item .env.example .env
 docker compose up --build -d
-curl.exe http://127.0.0.1:8000/health
 ```
 
-Edit `backend/.env` to set:
+Optional `backend/.env` settings for that development stack:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PAPERLIGHT_BIND_HOST` | `127.0.0.1` | Host interface receiving the API. Keep this for a same-machine HTTPS proxy; use `0.0.0.0` only if remote devices must reach the port directly. |
 | `PAPERLIGHT_API_PORT` | `8000` | Port on the Windows host. The API's container port remains `8000`. |
-| `PAPERLIGHT_CORS_ORIGINS` | `http://localhost:8765,http://127.0.0.1:8765` | Comma-separated browser origins allowed to call the API. Add the exact HTTPS reader origin when using the published website. |
+| `PAPERLIGHT_CORS_ORIGINS` | `http://localhost:8040,http://127.0.0.1:8040` | Comma-separated browser origins allowed to call the API directly. |
 
-After changing `.env`, run `docker compose up -d --force-recreate`. The API is at `http://127.0.0.1:<PAPERLIGHT_API_PORT>` and interactive docs are at `/docs`. GROBID stays inside the Compose network and has no published host port. Source PDFs, parsed assets, history, and notes persist in the repository's `userdata/documents/`; Docling models persist in a Docker volume. The Docker image installs CPU-only PyTorch and torchvision, and Compose uses GROBID's smaller CPU/CRF image. CRF uses less disk and memory than the full image, with some loss of citation and metadata extraction accuracy. First startup downloads the Docling models and GROBID image and may take some time. Use `docker compose logs -f api` to inspect errors and `docker compose down` to stop.
+After changing `.env`, run `docker compose up -d --force-recreate`. The development API is at `http://127.0.0.1:<PAPERLIGHT_API_PORT>` and interactive docs are at `/docs`. Use `docker compose logs -f api` to inspect errors and `docker compose down` to stop before resuming the root stack.
 
 ## Run without Docker on Windows
 
@@ -63,4 +71,4 @@ GROBID header and citation consolidation are enabled to enrich DOI, publication,
 
 When GROBID is unreachable or returns no bibliography, the API uses PDFium's text layer to recover numbered references and link numeric in-text callouts. This fallback preserves citation navigation but may omit venue, DOI, or other bibliographic fields.
 
-For the hosted frontend, use the reader settings to set “Parser API URL” to a separately hosted HTTPS API endpoint. The static Sites deployment does not host this Python API. A public endpoint needs authentication, HTTPS, request limits, and a `PAPERLIGHT_CORS_ORIGINS` value including the reader origin. An HTTPS proxy on the Windows host can forward to the default loopback binding without publishing the API port directly.
+The current Tailscale reader uses the same-origin Next.js proxy, so remote browsers only connect to the Web address. Do not expose the parser or GROBID ports for this setup.
