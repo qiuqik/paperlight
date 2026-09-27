@@ -219,8 +219,42 @@ def _add_anchored_equations(old: dict, new: dict) -> tuple[list[str], int, dict[
     return assets, equation_count - len(assets), skipped
 
 
+def _append_missing_appendix(old: dict, new: dict) -> tuple[list[str], int, int]:
+    """Append a disjoint appendix that the legacy References cutoff lost."""
+    if any(section.get("type") == "appendix" for section in old.get("sections", [])):
+        return [], 0, 0
+    sections = [section for section in new.get("sections", []) if section.get("type") == "appendix"]
+    if not sections:
+        return [], 0, 0
+    blocks = [block for section in sections for block in section.get("blocks", [])]
+    pages = [block.get("page") for block in blocks if block.get("page")]
+    old_pages = [block.get("page") for section in old.get("sections", [])
+                 for block in section.get("blocks", []) if block.get("page")]
+    if not pages or not old_pages or min(pages) <= max(old_pages):
+        raise ValueError("Appendix pages overlap existing legacy content")
+    old_section_ids = {section.get("id") for section in old.get("sections", [])}
+    old_blocks = _blocks(old)
+    if any(section.get("id") in old_section_ids for section in sections):
+        raise ValueError("Appendix section ID collides with existing section")
+    if any(block.get("id") in old_blocks for block in blocks):
+        raise ValueError("Appendix block ID collides with existing block")
+    old_assets = {block.get("src") for block in old_blocks.values() if block.get("src")}
+    assets = [Path(block["src"]).name for block in blocks if block.get("src")]
+    if any(block.get("src") in old_assets for block in blocks if block.get("src")):
+        raise ValueError("Appendix asset collides with an existing asset")
+    old.setdefault("sections", []).extend(sections)
+    for collection in ("figures", "tables"):
+        appended_ids = {block["id"] for block in blocks if block.get("type") == collection[:-1]}
+        if appended_ids:
+            old.setdefault(collection, []).extend(
+                block for block in new.get(collection, []) if block.get("id") in appended_ids)
+    for order, block in enumerate(block for section in old["sections"] for block in section.get("blocks", [])):
+        block["order"] = order
+    return assets, len(sections), len(blocks)
+
+
 def upgrade(folder: Path, backup_root: Path | None, geometry_only: bool = False,
-            add_equations: bool = False) -> dict:
+            add_equations: bool = False, append_missing_appendix: bool = False) -> dict:
     path = folder / "document.json"
     old = json.loads(path.read_text(encoding="utf-8"))
     old_blocks = _blocks(old)
@@ -260,6 +294,12 @@ def upgrade(folder: Path, backup_root: Path | None, geometry_only: bool = False,
                 geometry_report["unplacedEquations"] = unplaced_equations
                 geometry_report["equationSkipReasons"] = skip_reasons
                 geometry_report["blocks"] = len(_blocks(old))
+            appendix_assets, appended_sections, appended_blocks = (
+                _append_missing_appendix(old, new) if append_missing_appendix else ([], 0, 0))
+            if append_missing_appendix:
+                geometry_report["appendedSections"] = appended_sections
+                geometry_report["appendedBlocks"] = appended_blocks
+                geometry_report["blocks"] = len(_blocks(old))
             replacement = old
         else:
             _check_compatibility(old, new, annotations)
@@ -277,9 +317,9 @@ def upgrade(folder: Path, backup_root: Path | None, geometry_only: bool = False,
         backup.mkdir(parents=True)
         shutil.copy2(path, backup / "document.json")
         staged_assets = stage / "assets"
-        if staged_assets.is_dir() and (not geometry_only or equation_assets):
+        if staged_assets.is_dir() and (not geometry_only or equation_assets or appendix_assets):
             assets_to_copy = (staged_assets.iterdir() if not geometry_only else
-                              (staged_assets / name for name in equation_assets))
+                              (staged_assets / name for name in dict.fromkeys([*equation_assets, *appendix_assets])))
             for asset in assets_to_copy:
                 destination = folder / "assets" / asset.name
                 if destination.exists():
@@ -301,9 +341,12 @@ def main() -> None:
     parser.add_argument("--id", action="append", default=[], help="Process only this document ID or unique prefix")
     parser.add_argument("--geometry-only", action="store_true", help="Keep legacy text, IDs, and order; add only proven positions")
     parser.add_argument("--add-equations", action="store_true", help="With --geometry-only, insert cropped equations at exact text anchors")
+    parser.add_argument("--append-missing-appendix", action="store_true", help="With --geometry-only, append a nonoverlapping lost appendix")
     args = parser.parse_args()
-    if args.add_equations and not args.geometry_only:
-        parser.error("--add-equations requires --geometry-only")
+    if (args.add_equations or args.append_missing_appendix) and not args.geometry_only:
+        parser.error("Equation and appendix recovery require --geometry-only")
+    if args.add_equations and args.append_missing_appendix:
+        parser.error("Run equation recovery and appendix recovery in separate backed-up passes")
     if args.backup_dir and args.backup_dir.resolve().is_relative_to(args.data_dir.resolve()):
         parser.error("Backup directory must be outside the document data directory")
     for folder in sorted(args.data_dir.iterdir()):
@@ -312,7 +355,8 @@ def main() -> None:
         if args.id and not any(folder.name.startswith(prefix) for prefix in args.id):
             continue
         try:
-            print(json.dumps(upgrade(folder, args.backup_dir, args.geometry_only, args.add_equations)))
+            print(json.dumps(upgrade(folder, args.backup_dir, args.geometry_only,
+                                     args.add_equations, args.append_missing_appendix)))
         except Exception as exc:
             print(json.dumps({"id": folder.name[:8], "status": "skipped", "reason": str(exc)}))
 

@@ -918,7 +918,7 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
                 current = None
                 continue
             if in_references:
-                if re.match(r"^(?:(?:appendix|supplementary material|supplemental material)(?:\s+[A-Z0-9.:—-]+)?|[A-Z]\.\s+[A-Z]|author biographies|biographical notes)", text, re.I):
+                if re.match(r"^(?:(?:appendix|supplementary material|supplemental material)(?:\s+[A-Z0-9.:—-]+)?|[A-Z]\.?(?:\s+[A-Z])|author biographies|biographical notes)", text, re.I):
                     in_references = False
                     in_appendix = True
                 else:
