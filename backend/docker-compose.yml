@@ -8,6 +8,7 @@ services:
     environment:
       GROBID_URL: http://grobid:8070
       PAPERLIGHT_DATA_DIR: /userdata/documents
+      PAPERLIGHT_LIBRARY_DIR: /userdata/library
       PAPERLIGHT_REFERENCE_MODE: ${PAPERLIGHT_REFERENCE_MODE:-auto}
       PAPERLIGHT_RESULT_DIR: /result
       PAPERLIGHT_CORS_ORIGINS: ${PAPERLIGHT_CORS_ORIGINS:-http://localhost:8765,http://127.0.0.1:8765}

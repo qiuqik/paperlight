@@ -19,7 +19,19 @@ const TOOLS: Array<{id: Tool; label: string; Icon: typeof Highlighter}> = [
 
 type ParserState = {documentId: string; status: string; stage?: string; progress?: number; document?: DocumentModel; error?: string};
 type ServerRecord = {documentId: string; title: string; pageCount: number; status: string};
+type LibraryRecord = {id: string; name: string; folder: string; size: number};
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+async function waitForDocument(state: ParserState, onProgress: (message: string) => void): Promise<ParserState & {document: DocumentModel}> {
+  for (let tries = 0; tries < 360 && state.status === 'processing'; tries++) {
+    onProgress(`正在解析：${state.stage || '等待中'} · ${Math.round((state.progress || 0) * 100)}%`);
+    await pause(2000);
+    const response = await fetch(`/api/parser/api/documents/${state.documentId}`);
+    if (!response.ok) throw new Error(`状态查询失败 (${response.status})`);
+    state = await response.json() as ParserState;
+  }
+  if (!state.document) throw new Error(state.error || '解析未完成');
+  return state as ParserState & {document: DocumentModel};
+}
 
 export default function ReaderShell({initialId}: {initialId?: string}) {
   const [paper, setPaper] = useState<DocumentModel>(SAMPLE);
@@ -30,8 +42,10 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const [historySource, setHistorySource] = useState<'local' | 'server'>('local');
   const [localHistory, setLocalHistory] = useState<SavedDocument[]>([]);
   const [serverHistory, setServerHistory] = useState<ServerRecord[]>([]);
+  const [serverLibrary, setServerLibrary] = useState<LibraryRecord[]>([]);
   const [cachePdf, setCachePdf] = useState(false);
   const [noteFocusId, setNoteFocusId] = useState<string | null>(null);
+  const [openNoteEditors, setOpenNoteEditors] = useState<Set<string>>(() => new Set());
   const [progress, setProgress] = useState(0);
   const [colorOpen, setColorOpen] = useState(false);
   const articleRef = useRef<HTMLElement>(null);
@@ -190,15 +204,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
       setImportStatus('正在上传 PDF…');
       const response = await fetch('/api/parser/api/documents', {method: 'POST', body});
       if (!response.ok) throw new Error(`上传失败 (${response.status})`);
-      let state = await response.json() as ParserState;
-      for (let tries = 0; tries < 360 && state.status === 'processing'; tries++) {
-        setImportStatus(`正在解析：${state.stage || '等待中'} · ${Math.round((state.progress || 0) * 100)}%`);
-        await pause(2000);
-        const poll = await fetch(`/api/parser/api/documents/${state.documentId}`);
-        if (!poll.ok) throw new Error(`状态查询失败 (${poll.status})`);
-        state = await poll.json() as ParserState;
-      }
-      if (!state.document) throw new Error(state.error || '解析未完成');
+      const state = await waitForDocument(await response.json() as ParserState, setImportStatus);
       await saveDocument({id: hash, document: state.document, filename: file.name, savedAt: Date.now(), pdf: cachePdf ? file : undefined, serverId: state.documentId});
       await openDocument(state.document, hash, state.documentId);
       setImportStatus('');
@@ -209,7 +215,11 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const openHistory = async (source: 'local' | 'server') => {
     setHistorySource(source); layout.set({historyOpen: true});
     if (source === 'local') {try {setLocalHistory((await listDocuments()).sort((a, b) => b.savedAt - a.savedAt));} catch {setLocalHistory([]);}}
-    else {try {const response = await fetch('/api/parser/api/documents'); setServerHistory(response.ok ? await response.json() : []);} catch {setServerHistory([]);}}
+    else {
+      const [documents, library] = await Promise.allSettled([fetch('/api/parser/api/documents'), fetch('/api/parser/api/library')]);
+      setServerHistory(documents.status === 'fulfilled' && documents.value.ok ? await documents.value.json() : []);
+      setServerLibrary(library.status === 'fulfilled' && library.value.ok ? await library.value.json() : []);
+    }
   };
   const openServer = async (id: string) => {
     const response = await fetch(`/api/parser/api/documents/${id}`);
@@ -217,6 +227,18 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     const state = await response.json() as ParserState;
     if (!state.document) throw new Error('文档尚未完成解析');
     await openDocument(state.document, id, id);
+  };
+  const openLibrary = async (id: string, filename: string) => {
+    setImportStatus('正在打开服务器文件…');
+    try {
+      const response = await fetch(`/api/parser/api/library/${id}/open`, {method: 'POST'});
+      if (!response.ok) throw new Error(`服务器文件无法打开 (${response.status})`);
+      const state = await waitForDocument(await response.json() as ParserState, setImportStatus);
+      const localKey = state.document.fingerprint || state.documentId;
+      await saveDocument({id: localKey, document: state.document, filename, savedAt: Date.now(), serverId: state.documentId});
+      await openDocument(state.document, localKey, state.documentId);
+      setImportStatus('');
+    } catch (error) {setImportStatus(error instanceof Error ? error.message : '打开服务器文件失败');}
   };
   const jumpToAnnotation = (record: Annotation) => {
     const root = articleRef.current;
@@ -232,7 +254,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     <div className="color-control"><button type="button" aria-label="选择标注颜色" title="标注颜色" onClick={() => setColorOpen(!colorOpen)}><span className="color-dot" style={{background: prefs.activeColor}} /><Palette size={14} /></button>{colorOpen && <div className="color-popover">{COLORS.map(color => <button key={color} type="button" title={color} aria-label={`颜色 ${color}`} style={{background: color}} onClick={() => {prefs.set({activeColor: color}); setColorOpen(false);}} />)}<input type="color" aria-label="自定义颜色" value={prefs.activeColor} onChange={event => prefs.set({activeColor: event.target.value})} /></div>}</div>
   </div>;
 
-  return <div className={`reader-app theme-${prefs.theme} dock-${prefs.toolbarDock} ${layout.focus ? 'focus-mode' : ''} ${annotationUI.activeTool === 'area' ? 'area-mode' : ''}`} style={{'--reader-font': prefs.fontFamily, '--reader-size': `${prefs.fontSize}px`, '--reader-leading': prefs.lineHeight, '--reader-width': `${prefs.contentWidth}px`} as React.CSSProperties}>
+  return <div className={`reader-app theme-${prefs.theme} dock-${prefs.toolbarDock} ${layout.focus ? 'focus-mode' : ''} ${annotationUI.activeTool === 'area' ? 'area-mode' : ''}`} style={{'--reader-font': prefs.fontFamily, '--reader-size': `${prefs.fontSize}px`, '--reader-leading': prefs.lineHeight, '--reader-width': `${prefs.contentWidth}px`, '--custom-app': prefs.customApp, '--custom-paper': prefs.customPaper, '--custom-text': prefs.customText, '--custom-accent': prefs.customAccent} as React.CSSProperties}>
     <header className="reader-topbar"><div className="brand"><BookOpen size={20} /><strong>Paperlight</strong></div><span className="top-title" title={paper.metadata.title}>{paper.metadata.title}</span>{prefs.toolbarDock === 'top' && toolbar}<div className="top-actions"><span className="read-time"><Clock3 size={15} /> {paper.metadata.readMinutes || '—'} min</span><button title="专注模式" aria-label="专注模式" aria-pressed={layout.focus} onClick={() => layout.set({focus: !layout.focus, leftOpen: layout.focus, rightOpen: layout.focus})}><Maximize2 size={18} /></button><button title="设置" aria-label="设置" onClick={() => layout.set({settingsOpen: true})}><Settings2 size={18} /></button><button title="历史记录" aria-label="历史记录" onClick={() => void openHistory('local')}><Clock3 size={18} /></button><button className="import-button" onClick={() => fileRef.current?.click()}><FilePlus2 size={16} /> 导入</button></div></header>
     {importStatus && <div className="status-banner" role="status">{importStatus}<button aria-label="关闭提示" onClick={() => setImportStatus('')}><X size={14} /></button></div>}
     <div className="reader-grid"><aside className={`left-panel ${layout.leftOpen ? 'open' : ''}`}><div className="panel-heading"><span>目录</span><button title="收起目录" onClick={() => layout.set({leftOpen: false})}><ChevronLeft size={16} /></button></div><nav>{paper.sections.map(section => <button key={section.id} className={`toc-item level-${section.level}`} onClick={() => document.getElementById(section.id)?.scrollIntoView({behavior: 'smooth'})}>{section.title}</button>)}</nav></aside>
@@ -243,10 +265,13 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
         {layout.rightPanel === 'references' && (paper.references.length ? paper.references.map(ref => <div className="reference-card" id={`ref-${ref.id}`} key={ref.id}><small>[{ref.number}] {ref.authors}</small><strong>{ref.title}</strong><span>{ref.venue} {ref.year}</span>{ref.preview && <p>{ref.preview}</p>}</div>) : <p className="empty-panel">暂无参考文献</p>)}
         {layout.rightPanel === 'figures' && (paper.figures.length ? paper.figures.map(item => <button className="asset-card" key={item.id} onClick={() => document.getElementById(item.id)?.scrollIntoView({behavior: 'smooth', block: 'center'})}>{item.src && <img src={item.src} alt="" />}<strong>{item.label || `Figure ${item.number}`}</strong><span>{item.caption}</span></button>) : <p className="empty-panel">暂无图片</p>)}
         {layout.rightPanel === 'tables' && (paper.tables.length ? paper.tables.map(item => <button className="asset-card" key={item.id} onClick={() => document.getElementById(item.id)?.scrollIntoView({behavior: 'smooth', block: 'center'})}><strong>{item.label || `Table ${item.number}`}</strong><span>{item.caption}</span></button>) : <p className="empty-panel">暂无表格</p>)}
-        {layout.rightPanel === 'notes' && (annotations.length ? annotations.map(item => <div className="note-card" key={item.id} style={{borderColor: item.color, background: `${item.color}18`}}><button className="note-quote" onClick={() => jumpToAnnotation(item)}>{isTextAnchor(item.anchor) ? `“${item.anchor.quote}”` : `第 ${item.anchor.page} 页区域`}</button>{(item.type === 'note' || !!item.note) && <textarea aria-label="笔记内容" placeholder="输入笔记…" value={item.note || ''} autoFocus={noteFocusId === item.id} onFocus={() => setNoteFocusId(null)} onChange={event => void updateNote(item, event.target.value)} />}<div className="note-footer"><span>{item.type}</span><button onClick={() => void removeAnnotation(item)}>删除</button></div></div>) : <p className="empty-panel">选择文字后，笔记和标注会出现在这里。</p>)}
+        {layout.rightPanel === 'notes' && (annotations.length ? annotations.map(item => <div className="note-card" key={item.id} style={{borderColor: item.color, background: `${item.color}18`}}><button className="note-quote" onClick={() => jumpToAnnotation(item)}>{isTextAnchor(item.anchor) ? `“${item.anchor.quote}”` : `第 ${item.anchor.page} 页区域`}</button>{(item.type === 'note' || !!item.note || openNoteEditors.has(item.id)) && <textarea aria-label="笔记内容" placeholder="输入笔记…" value={item.note || ''} autoFocus={noteFocusId === item.id} onFocus={() => setNoteFocusId(null)} onChange={event => void updateNote(item, event.target.value)} />}<div className="note-footer"><span>{item.type}</span>{item.type !== 'note' && !item.note && !openNoteEditors.has(item.id) && <button onClick={() => {setOpenNoteEditors(current => new Set(current).add(item.id)); setNoteFocusId(item.id);}}>添加笔记</button>}<button onClick={() => void removeAnnotation(item)}>删除</button></div></div>) : <p className="empty-panel">选择文字后，笔记和标注会出现在这里。</p>)}
       </div></aside></div>
-    {layout.settingsOpen && <div className="drawer-backdrop" onClick={() => layout.set({settingsOpen: false})}><aside className="settings-drawer" onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>阅读设置</h2><button aria-label="关闭设置" onClick={() => layout.set({settingsOpen: false})}><X size={20} /></button></div><label>字体<select value={prefs.fontFamily} onChange={event => prefs.set({fontFamily: event.target.value})}><option value="Georgia, serif">Georgia</option><option value="Arial, sans-serif">Arial</option><option value="'Times New Roman', serif">Times New Roman</option></select></label><label>字号 <b>{prefs.fontSize}px</b><input type="range" min="14" max="26" value={prefs.fontSize} onChange={event => prefs.set({fontSize: Number(event.target.value)})} /></label><label>行距 <b>{prefs.lineHeight.toFixed(1)}</b><input type="range" min="1.2" max="2.2" step="0.1" value={prefs.lineHeight} onChange={event => prefs.set({lineHeight: Number(event.target.value)})} /></label><label>阅读宽度 <b>{prefs.contentWidth}px</b><input type="range" min="600" max="1200" step="20" value={prefs.contentWidth} onChange={event => prefs.set({contentWidth: Number(event.target.value)})} /></label><label>主题<select value={prefs.theme} onChange={event => prefs.set({theme: event.target.value as 'paper' | 'warm' | 'dark'})}><option value="paper">纸张</option><option value="warm">暖色</option><option value="dark">深色</option></select></label><label>工具栏位置<select value={prefs.toolbarDock} onChange={event => prefs.set({toolbarDock: event.target.value as typeof prefs.toolbarDock})}><option value="top">顶部</option><option value="bottom">底部</option><option value="left">左侧</option><option value="right">右侧</option></select></label><label className="check-row"><input type="checkbox" checked={cachePdf} onChange={event => setCachePdf(event.target.checked)} />新导入时在此浏览器缓存 PDF</label></aside></div>}
-    {layout.historyOpen && <div className="dialog-backdrop" onClick={() => layout.set({historyOpen: false})}><section className="history-dialog" onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>历史记录</h2><button aria-label="关闭历史记录" onClick={() => layout.set({historyOpen: false})}><X size={20} /></button></div><div className="history-tabs"><button className={historySource === 'local' ? 'active' : ''} onClick={() => void openHistory('local')}>此浏览器</button><button className={historySource === 'server' ? 'active' : ''} onClick={() => void openHistory('server')}>服务器</button></div><div className="history-list">{historySource === 'local' ? (localHistory.length ? localHistory.map(item => <button key={item.id} onClick={() => void openDocument(item.document, item.id, item.serverId)}><strong>{item.document.metadata.title}</strong><small>{item.filename} · {item.document.metadata.pageCount} 页</small></button>) : <p className="empty-panel">此浏览器还没有导入的论文。</p>) : (serverHistory.length ? serverHistory.map(item => <button key={item.documentId} onClick={() => void openServer(item.documentId).catch(error => setImportStatus(error.message))}><strong>{item.title}</strong><small>{item.pageCount} 页 · {item.status}</small></button>) : <p className="empty-panel">服务器暂无论文，或服务未启动。</p>)}</div></section></div>}
+    {layout.settingsOpen && <div className="drawer-backdrop" onClick={() => layout.set({settingsOpen: false})}><aside className="settings-drawer" onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>阅读设置</h2><button aria-label="关闭设置" onClick={() => layout.set({settingsOpen: false})}><X size={20} /></button></div><label>字体<select value={prefs.fontFamily} onChange={event => prefs.set({fontFamily: event.target.value})}><option value="Georgia, serif">Georgia</option><option value="Arial, sans-serif">Arial</option><option value="'Times New Roman', serif">Times New Roman</option></select></label><label>字号 <b>{prefs.fontSize}px</b><input type="range" min="14" max="26" value={prefs.fontSize} onChange={event => prefs.set({fontSize: Number(event.target.value)})} /></label><label>行距 <b>{prefs.lineHeight.toFixed(1)}</b><input type="range" min="1.2" max="2.2" step="0.1" value={prefs.lineHeight} onChange={event => prefs.set({lineHeight: Number(event.target.value)})} /></label><label>阅读宽度 <b>{prefs.contentWidth}px</b><input type="range" min="600" max="1200" step="20" value={prefs.contentWidth} onChange={event => prefs.set({contentWidth: Number(event.target.value)})} /></label><label>主题<select value={prefs.theme} onChange={event => prefs.set({theme: event.target.value as typeof prefs.theme})}><option value="paper">纸张</option><option value="warm">暖色</option><option value="dark">深色</option><option value="custom">自定义</option></select></label>{prefs.theme === 'custom' && <div className="custom-theme-colors">{([['customApp', '界面背景'], ['customPaper', '纸张背景'], ['customText', '正文文字'], ['customAccent', '强调色']] as const).map(([key, label]) => <label key={key}>{label}<input type="color" value={prefs[key]} onChange={event => prefs.set({[key]: event.target.value})} /></label>)}</div>}<label>工具栏位置<select value={prefs.toolbarDock} onChange={event => prefs.set({toolbarDock: event.target.value as typeof prefs.toolbarDock})}><option value="top">顶部</option><option value="bottom">底部</option><option value="left">左侧</option><option value="right">右侧</option></select></label><label className="check-row"><input type="checkbox" checked={cachePdf} onChange={event => setCachePdf(event.target.checked)} />新导入时在此浏览器缓存 PDF</label></aside></div>}
+    {layout.historyOpen && <div className="dialog-backdrop" onClick={() => layout.set({historyOpen: false})}><section className="history-dialog" onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>历史记录</h2><button aria-label="关闭历史记录" onClick={() => layout.set({historyOpen: false})}><X size={20} /></button></div><div className="history-tabs"><button className={historySource === 'local' ? 'active' : ''} onClick={() => void openHistory('local')}>此浏览器</button><button className={historySource === 'server' ? 'active' : ''} onClick={() => void openHistory('server')}>服务器</button></div><div className="history-list">{historySource === 'local' ? (localHistory.length ? localHistory.map(item => <button key={item.id} onClick={() => void openDocument(item.document, item.id, item.serverId)}><strong>{item.document.metadata.title}</strong><small>{item.filename} · {item.document.metadata.pageCount} 页</small></button>) : <p className="empty-panel">此浏览器还没有导入的论文。</p>) : <>
+      <h3>已解析文档</h3>{serverHistory.length ? serverHistory.map(item => <button key={item.documentId} onClick={() => void openServer(item.documentId).catch(error => setImportStatus(error.message))}><strong>{item.title}</strong><small>{item.pageCount} 页 · {item.status}</small></button>) : <p className="empty-panel">暂无已解析文档。</p>}
+      <h3>服务器文件库</h3>{serverLibrary.length ? serverLibrary.map(item => <button key={item.id} onClick={() => void openLibrary(item.id, item.name)}><strong>{item.name}</strong><small>{item.folder === '.' ? '文件库根目录' : item.folder} · {(item.size / 1024 / 1024).toFixed(1)} MB</small></button>) : <p className="empty-panel">文件库为空，或解析服务未启动。</p>}
+    </>}</div></section></div>}
     <input ref={fileRef} type="file" accept="application/pdf,.pdf" hidden onChange={event => void importPdf(event.target.files?.[0])} />
   </div>;
 }

@@ -16,7 +16,9 @@ class AnnotationApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.old_data_dir = main.DATA_DIR
+        self.old_library_dir = main.LIBRARY_DIR
         main.DATA_DIR = Path(self.temp.name)
+        main.LIBRARY_DIR = Path(self.temp.name) / "library"
         folder = main.DATA_DIR / self.document_id
         folder.mkdir()
         (folder / "status.json").write_text('{"status":"ready"}', encoding="utf-8")
@@ -25,6 +27,7 @@ class AnnotationApiTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         main.DATA_DIR = self.old_data_dir
+        main.LIBRARY_DIR = self.old_library_dir
         self.temp.cleanup()
 
     def test_cross_block_note_round_trip(self) -> None:
@@ -62,6 +65,28 @@ class AnnotationApiTests(unittest.TestCase):
             second = self.client.post("/api/documents", files={"file": ("renamed.pdf", payload, "application/pdf")})
             self.assertEqual(first.status_code, 202)
             self.assertEqual(second.status_code, 202)
+            self.assertEqual(first.json()["documentId"], second.json()["documentId"])
+        finally:
+            main._process_document = old_process
+
+    def test_library_uses_opaque_id_and_reuses_document(self) -> None:
+        nested = main.LIBRARY_DIR / "papers"
+        nested.mkdir(parents=True)
+        (nested / "sample.pdf").write_bytes(b"%PDF-1.4\nlibrary")
+        (nested / "notes.txt").write_text("not a PDF", encoding="utf-8")
+        items = self.client.get("/api/library").json()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["name"], "sample.pdf")
+        self.assertEqual(items[0]["folder"], "papers")
+        self.assertNotIn("path", items[0])
+        self.assertEqual(self.client.post("/api/library/../../open").status_code, 404)
+        self.assertEqual(self.client.post("/api/library/not-a-library-id/open").status_code, 404)
+        old_process = main._process_document
+        main._process_document = lambda document_id, filename: None
+        try:
+            first = self.client.post(f"/api/library/{items[0]['id']}/open")
+            second = self.client.post(f"/api/library/{items[0]['id']}/open")
+            self.assertEqual(first.status_code, 202)
             self.assertEqual(first.json()["documentId"], second.json()["documentId"])
         finally:
             main._process_document = old_process

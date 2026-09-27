@@ -26,6 +26,7 @@ from .normalizer import extract_pdf_references, normalize_docling, parse_grobid
 
 APP_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("PAPERLIGHT_DATA_DIR", APP_DIR / "storage" / "documents")).resolve()
+LIBRARY_DIR = Path(os.environ.get("PAPERLIGHT_LIBRARY_DIR", APP_DIR / "storage" / "library")).resolve()
 RESULT_DIR = Path(os.environ["PAPERLIGHT_RESULT_DIR"]).resolve() if os.environ.get("PAPERLIGHT_RESULT_DIR") else None
 GROBID_URL = os.environ.get("GROBID_URL", "http://127.0.0.1:8070").rstrip("/")
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(80 * 1024 * 1024)))
@@ -230,6 +231,40 @@ def list_documents() -> list[dict[str, Any]]:
         except (OSError, ValueError, TypeError):
             continue
     return sorted(records, key=lambda item: item["createdAt"], reverse=True)
+
+
+def _library_items() -> list[tuple[str, Path, str]]:
+    """Enumerate only regular PDFs beneath the configured library root."""
+    if not LIBRARY_DIR.is_dir():
+        return []
+    items: list[tuple[str, Path, str]] = []
+    for candidate in LIBRARY_DIR.rglob("*"):
+        if candidate.suffix.lower() != ".pdf" or candidate.is_symlink() or not candidate.is_file():
+            continue
+        path = candidate.resolve()
+        if not path.is_relative_to(LIBRARY_DIR):
+            continue
+        relative = path.relative_to(LIBRARY_DIR).as_posix()
+        library_id = hashlib.sha256(relative.encode("utf-8")).hexdigest()[:24]
+        items.append((library_id, path, relative))
+    return sorted(items, key=lambda entry: entry[2].casefold())
+
+
+@app.get("/api/library")
+def list_library() -> list[dict[str, Any]]:
+    return [{"id": library_id, "name": path.name, "folder": str(Path(relative).parent).replace("\\", "/"),
+             "size": path.stat().st_size} for library_id, path, relative in _library_items()]
+
+
+@app.post("/api/library/{library_id}/open", response_model=ProcessingStatus, status_code=202)
+async def open_library_document(library_id: str, background_tasks: BackgroundTasks) -> ProcessingStatus:
+    if not re.fullmatch(r"[a-f0-9]{24}", library_id):
+        raise HTTPException(status_code=404, detail="Library document not found.")
+    item = next((path for item_id, path, _ in _library_items() if item_id == library_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Library document not found.")
+    with item.open("rb") as source:
+        return await create_document(background_tasks, UploadFile(file=source, filename=item.name))
 
 
 @app.get("/api/documents/{document_id}/annotations")

@@ -17,6 +17,7 @@ services:
     environment:
       GROBID_URL: http://grobid:8070
       PAPERLIGHT_DATA_DIR: /userdata/documents
+      PAPERLIGHT_LIBRARY_DIR: /userdata/library
       PAPERLIGHT_RESULT_DIR: /result
       PAPERLIGHT_REFERENCE_MODE: ${PAPERLIGHT_REFERENCE_MODE:-auto}
       HF_HOME: /models/huggingface

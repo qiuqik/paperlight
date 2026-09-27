@@ -39,6 +39,8 @@ Use a different installed Python version in the first command if needed. Docling
 - `POST /api/documents` — multipart field `file`, returns a processing document ID.
 - `GET /api/documents/{id}` — processing stage or the normalized document JSON.
 - `GET /api/documents` — saved document history.
+- `GET /api/library` — PDFs under the configured server library root.
+- `POST /api/library/{id}/open` — import a library PDF by its opaque ID; arbitrary paths are not accepted.
 - `GET /api/documents/{id}/annotations` — saved highlights and notes.
 - `POST /api/documents/{id}/annotations` — create a highlight or note.
 - `PATCH /api/documents/{id}/annotations/{annotation_id}` — edit a note.
@@ -47,6 +49,8 @@ Use a different installed Python version in the first command if needed. Docling
 - `GET /health` — parser availability and GROBID endpoint.
 
 Original PDFs, normalized JSON, raw `docling.json`, optional `grobid.xml`, extracted assets, and `annotations.json` are stored under `userdata/documents/{id}` with Docker Compose. Set `PAPERLIGHT_DATA_DIR` to move storage for a direct Python run. Set `GROBID_URL` if GROBID listens somewhere other than `http://127.0.0.1:8070`. `PAPERLIGHT_CORS_ORIGINS` accepts comma-separated frontend origins; a direct Python run without this setting allows all origins for local development. Uploaded PDFs are limited to 80 MB by default (`MAX_UPLOAD_BYTES`).
+
+Place server library PDFs under `userdata/library/` when using Docker Compose. `PAPERLIGHT_LIBRARY_DIR` changes that root for a direct Python run. The library API lists only regular PDF files within the root and returns opaque IDs, not file paths.
 
 Docker Compose also copies each finished or failed parsing attempt to the repository's local `result/{id}/` directory, including the source PDF, status, raw Docling/GROBID output, normalized JSON, and figure assets. This directory is ignored by Git so it can hold examples for parser debugging. For a direct Python run, set `PAPERLIGHT_RESULT_DIR` to enable the same snapshots.
 
