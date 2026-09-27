@@ -427,7 +427,10 @@ def get_document(document_id: str) -> ProcessingStatus:
     document_path = DATA_DIR / document_id / "document.json"
     if state.get("status") == "ready" and document_path.is_file():
         try:
-            state["document"] = json.loads(document_path.read_text(encoding="utf-8"))
+            document = json.loads(document_path.read_text(encoding="utf-8"))
+            if isinstance(document, dict):
+                document.setdefault("modelVersion", 1)
+            state["document"] = document
         except (OSError, json.JSONDecodeError):
             state.update(status="failed", error="Processed document data could not be read.")
     return ProcessingStatus(**state)

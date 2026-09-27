@@ -71,6 +71,7 @@ class AnnotationApiTests(unittest.TestCase):
             model = self.client.get(f"/api/documents/{self.document_id}/model")
             self.assertEqual(model.status_code, 200)
             self.assertEqual(model.json()["metadata"]["title"], "Test paper")
+            self.assertEqual(model.json()["modelVersion"], 1)
             self.assertEqual(self.client.delete(f"/api/documents/{self.document_id}").status_code, 204)
             self.assertEqual(self.client.get(f"/api/documents/{self.document_id}").status_code, 404)
             self.assertFalse(result_folder.exists())
