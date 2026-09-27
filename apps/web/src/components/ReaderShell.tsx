@@ -1,5 +1,5 @@
 'use client';
-import {useCallback, useEffect, useRef, useState} from 'react';
+import {useCallback, useEffect, useLayoutEffect, useRef, useState} from 'react';
 import {BookOpen, ChevronLeft, ChevronRight, Clock3, FilePlus2, Highlighter, Image, List, Maximize2, Palette, Scan, Settings2, StickyNote, Table2, Underline, X} from 'lucide-react';
 import DocumentRenderer from './DocumentRenderer';
 import demo from '@/data/demo.json';
@@ -58,6 +58,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const [progress, setProgress] = useState(0);
   const [colorOpen, setColorOpen] = useState(false);
   const articleRef = useRef<HTMLElement>(null);
+  const readingAnchorRef = useRef<{blockId: string; blockOffset: number} | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const areaStart = useRef<{block: HTMLElement; x: number; y: number} | null>(null);
   const noteSyncTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
@@ -81,21 +82,41 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     let cancelled = false;
     let restored = false;
     let frame = 0;
-    let lastStored = -1;
+    let lastStored = '';
     const legacyKey = `paperlight-progress-${localId}`;
     const restore = async () => {
       let saved: number | undefined;
-      try {saved = (await getProgress(localId))?.percent;} catch {}
+      let savedBlockId: string | undefined;
+      let savedBlockOffset = 0;
+      try {
+        const entry = await getProgress(localId);
+        saved = entry?.percent;
+        savedBlockId = entry?.blockId;
+        savedBlockOffset = entry?.blockOffset || 0;
+      } catch {}
       if (saved === undefined) {
         try {saved = Number(localStorage.getItem(legacyKey)) || 0;} catch {saved = 0;}
         if (!cancelled) void saveProgress({id: localId, percent: saved, updatedAt: Date.now()}).catch(() => {});
       }
       if (cancelled) return;
-      saved = Math.max(0, Math.min(100, saved));
+      saved = Number.isFinite(saved) ? Math.max(0, Math.min(100, saved)) : 0;
       frame = requestAnimationFrame(() => {
-        root.scrollTop = (root.scrollHeight - root.clientHeight) * saved / 100;
-        setProgress(saved);
-        lastStored = saved;
+        const block = savedBlockId && Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.dataset.blockId === savedBlockId);
+        if (block) {
+          const fraction = Number.isFinite(savedBlockOffset) ? Math.max(0, Math.min(1, savedBlockOffset)) : 0;
+          root.scrollTop += block.getBoundingClientRect().top + block.getBoundingClientRect().height * fraction - root.getBoundingClientRect().top - 24;
+          readingAnchorRef.current = {blockId: savedBlockId!, blockOffset: fraction};
+        } else {
+          root.scrollTop = (root.scrollHeight - root.clientHeight) * saved / 100;
+          const top = root.getBoundingClientRect().top + 24;
+          const visible = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.getBoundingClientRect().bottom > top);
+          const bounds = visible?.getBoundingClientRect();
+          readingAnchorRef.current = visible?.dataset.blockId ? {blockId: visible.dataset.blockId, blockOffset: bounds?.height ? Math.max(0, Math.min(1, (top - bounds.top) / bounds.height)) : 0} : null;
+        }
+        const height = root.scrollHeight - root.clientHeight;
+        const actual = height > 0 ? Math.round(root.scrollTop / height * 100) : 0;
+        setProgress(actual);
+        lastStored = `${actual}:${savedBlockId || ''}:${Math.round(savedBlockOffset * 20)}`;
         restored = true;
       });
     };
@@ -104,11 +125,16 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
       const height = root.scrollHeight - root.clientHeight;
       const next = height > 0 ? Math.round(root.scrollTop / height * 100) : 0;
       setProgress(next);
-      if (next === lastStored) return;
-      lastStored = next;
       const top = root.getBoundingClientRect().top + 24;
-      const blockId = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.getBoundingClientRect().bottom > top)?.dataset.blockId;
-      void saveProgress({id: localId, percent: next, blockId, updatedAt: Date.now()}).catch(() => {
+      const block = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.getBoundingClientRect().bottom > top);
+      const blockId = block?.dataset.blockId;
+      const bounds = block?.getBoundingClientRect();
+      const blockOffset = bounds?.height ? Math.max(0, Math.min(1, (top - bounds.top) / bounds.height)) : 0;
+      readingAnchorRef.current = blockId ? {blockId, blockOffset} : null;
+      const marker = `${next}:${blockId || ''}:${Math.round(blockOffset * 20)}`;
+      if (marker === lastStored) return;
+      lastStored = marker;
+      void saveProgress({id: localId, percent: next, blockId, blockOffset, updatedAt: Date.now()}).catch(() => {
         try {localStorage.setItem(legacyKey, String(next));} catch {}
       });
     };
@@ -116,6 +142,16 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     void restore();
     return () => {cancelled = true; cancelAnimationFrame(frame); root.removeEventListener('scroll', onScroll);};
   }, [paper, localId]);
+
+  useLayoutEffect(() => {
+    const root = articleRef.current;
+    const anchor = readingAnchorRef.current;
+    if (!root || !anchor) return;
+    const block = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.dataset.blockId === anchor.blockId);
+    if (!block) return;
+    const bounds = block.getBoundingClientRect();
+    root.scrollTop += bounds.top + bounds.height * anchor.blockOffset - root.getBoundingClientRect().top - 24;
+  }, [prefs.fontFamily, prefs.fontSize, prefs.lineHeight, prefs.contentWidth, layout.focus, layout.leftOpen, layout.rightOpen]);
 
   const openDocument = useCallback(async (document: DocumentModel, id: string, remote?: string) => {
     const documentKey = document.fingerprint && /^[a-f0-9]{64}$/.test(document.fingerprint) ? document.fingerprint : id;
@@ -140,6 +176,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
         }
       } catch {}
     }
+    readingAnchorRef.current = null;
     setProgress(0); setPaper(resolveAssetSources(document, remote)); setLocalId(documentKey); setServerId(remote);
     if (remote) {
       try {

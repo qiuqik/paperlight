@@ -1,7 +1,7 @@
 import type {Annotation, DocumentModel} from './document';
 
 export type SavedDocument = {id: string; document: DocumentModel; filename: string; savedAt: number; pdf?: Blob; serverId?: string};
-export type ReadingProgress = {id: string; percent: number; blockId?: string; updatedAt: number};
+export type ReadingProgress = {id: string; percent: number; blockId?: string; blockOffset?: number; updatedAt: number};
 const DB_NAME = 'paperlight-v2';
 const DB_VERSION = 2;
 
