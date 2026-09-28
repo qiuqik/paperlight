@@ -71,6 +71,49 @@ def _check_compatibility(old: dict, new: dict, annotations: list[dict]) -> None:
                     raise ValueError("Cross-block annotation order changed")
 
 
+def _joined_raw_bbox(text: str, page: int, parts: list[tuple[str, int, dict]]) -> dict | None:
+    """Find one exact, same-column sequence of raw spans for a merged block."""
+    target = clean_text(text)
+    if not target:
+        return None
+    candidates = [(clean_text(value), box) for value, source_page, box in parts
+                  if source_page == page and len(clean_text(value)) >= 30]
+    matches: list[list[dict]] = []
+
+    def search(offset: int, boxes: list[dict]) -> None:
+        if len(matches) > 1 or len(boxes) > 4:
+            return
+        if offset == len(target):
+            if len(boxes) >= 2:
+                matches.append(boxes)
+            return
+        for value, box in candidates:
+            if not target.startswith(value, offset) or box in boxes:
+                continue
+            if boxes:
+                previous = boxes[-1]
+                overlap = max(0, min(previous["x"] + previous["width"], box["x"] + box["width"])
+                              - max(previous["x"], box["x"]))
+                if overlap < min(previous["width"], box["width"]) * 0.6:
+                    continue
+                if box["y"] < previous["y"] - 2 or box["y"] > previous["y"] + previous["height"] + 80:
+                    continue
+            end = offset + len(value)
+            if end < len(target) and target[end] != " ":
+                continue
+            search(end + (end < len(target)), [*boxes, box])
+
+    search(0, [])
+    if len(matches) != 1:
+        return None
+    boxes = matches[0]
+    left = min(box["x"] for box in boxes)
+    top = min(box["y"] for box in boxes)
+    right = max(box["x"] + box["width"] for box in boxes)
+    bottom = max(box["y"] + box["height"] for box in boxes)
+    return {"x": left, "y": top, "width": right - left, "height": bottom - top}
+
+
 def _merge_geometry(old: dict, new: dict, docling_document=None, pdf_document=None) -> dict:
     """Keep legacy content and IDs, copying only unambiguous PDF positions."""
     before, after = _blocks(old), _blocks(new)
@@ -78,7 +121,7 @@ def _merge_geometry(old: dict, new: dict, docling_document=None, pdf_document=No
 
     def signature(block: dict) -> tuple:
         return (block.get("type"), block.get("text", ""),
-                block.get("number"), block.get("caption", ""))
+                block.get("number"), block.get("caption", ""), tuple(block.get("items", [])))
 
     for block in after.values():
         if block.get("bbox"):
@@ -105,8 +148,10 @@ def _merge_geometry(old: dict, new: dict, docling_document=None, pdf_document=No
         block["page"] = block.get("page") or candidate.get("page")
         matched += 1
     raw_matched = 0
+    joined_matched = 0
     if docling_document is not None and pdf_document is not None:
         raw_positions: dict[tuple[str, int], list[dict]] = {}
+        raw_parts: list[tuple[str, int, dict]] = []
         for item, _depth in docling_document.iterate_items():
             provenance = getattr(item, "prov", None) or []
             if not provenance:
@@ -117,8 +162,10 @@ def _merge_geometry(old: dict, new: dict, docling_document=None, pdf_document=No
             box = _block_bbox(location, pdf_document)
             if text and page and box:
                 raw_positions.setdefault((text, int(page)), []).append(box)
+                if str(getattr(getattr(item, "label", None), "value", getattr(item, "label", ""))) in {"text", "list_item"}:
+                    raw_parts.append((text, int(page), box))
         for block in before.values():
-            if block.get("bbox") or block.get("type") not in {"paragraph", "quote", "footnote", "requirement", "code"}:
+            if block.get("bbox") or block.get("type") not in {"paragraph", "quote", "footnote", "requirement", "code", "list"}:
                 continue
             if old_occurrences[(signature(block), block.get("page"))] != 1:
                 continue
@@ -127,6 +174,12 @@ def _merge_geometry(old: dict, new: dict, docling_document=None, pdf_document=No
             if len(candidates) == 1:
                 block["bbox"] = candidates[0]
                 raw_matched += 1
+                continue
+            merged_text = block.get("text") or " ".join(block.get("items", []))
+            joined = _joined_raw_bbox(merged_text, block.get("page"), raw_parts)
+            if joined:
+                block["bbox"] = joined
+                joined_matched += 1
     if not old.get("pages"):
         old["pages"] = new.get("pages", [])
     for collection in ("figures", "tables"):
@@ -136,7 +189,7 @@ def _merge_geometry(old: dict, new: dict, docling_document=None, pdf_document=No
                 for key in ("page", "bbox", "order"):
                     if key in source:
                         block[key] = source[key]
-    return {"matched": matched, "rawMatched": raw_matched, "blocks": len(before),
+    return {"matched": matched, "rawMatched": raw_matched, "joinedMatched": joined_matched, "blocks": len(before),
             "missingBbox": sum(not block.get("bbox") for block in before.values()),
             "figuresMissingBbox": sum(block.get("type") == "figure" and not block.get("bbox")
                                       for block in before.values())}

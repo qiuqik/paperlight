@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from backend.scripts.upgrade_legacy_models import _add_anchored_equations, _append_missing_appendix, _check_compatibility, _merge_geometry
+from backend.scripts.upgrade_legacy_models import _add_anchored_equations, _append_missing_appendix, _check_compatibility, _joined_raw_bbox, _merge_geometry
 
 
 def model(*blocks):
@@ -71,6 +71,19 @@ class ModelUpgradeTests(unittest.TestCase):
         report = _merge_geometry(old, new)
         self.assertEqual(report["matched"], 0)
         self.assertEqual(report["missingBbox"], 2)
+
+    def test_joined_raw_geometry_requires_unique_same_column_text(self) -> None:
+        first = {"x": 320, "y": 100, "width": 210, "height": 15}
+        second = {"x": 318, "y": 140, "width": 215, "height": 35}
+        before = "The paragraph before the formula begins here"
+        after = "The paragraph continues after the formula ends"
+        parts = [(before, 2, first), (after, 2, second)]
+        self.assertEqual(_joined_raw_bbox(f"{before} {after}", 2, parts),
+                         {"x": 318, "y": 100, "width": 215, "height": 75})
+        repeated = [*parts, (after, 2, {"x": 320, "y": 145, "width": 210, "height": 30})]
+        self.assertIsNone(_joined_raw_bbox(f"{before} {after}", 2, repeated))
+        other_column = [(parts[0][0], 2, first), (parts[1][0], 2, {"x": 20, "y": 140, "width": 215, "height": 35})]
+        self.assertIsNone(_joined_raw_bbox(f"{before} {after}", 2, other_column))
 
     def test_equation_is_inserted_between_exact_neighbors(self) -> None:
         old = {"sections": [{"id": "method", "title": "Method", "type": "body", "blocks": [
