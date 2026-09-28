@@ -11,6 +11,7 @@ export default function AppShell({initialId, administration = false}: {initialId
   const [loading, setLoading] = useState(true);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -28,7 +29,7 @@ export default function AppShell({initialId, administration = false}: {initialId
     try {
       const response = await fetch('/api/parser/api/auth/login', {method: 'POST', headers: {'content-type': 'application/json'},
         body: JSON.stringify({username, password})});
-      if (!response.ok) throw new Error(response.status === 401 ? '用户名或密码错误' : `登录失败 (${response.status})`);
+      if (!response.ok) throw new Error(response.status === 401 ? '用户名或密码错误' : response.status === 403 ? '登录请求被拦截，请刷新页面后重试' : `登录失败 (${response.status})`);
       setPassword('');
       setUser(await response.json() as Account);
     } catch (cause) {setError(cause instanceof Error ? cause.message : '登录失败');}
@@ -45,7 +46,7 @@ export default function AppShell({initialId, administration = false}: {initialId
   if (!user) return <main className="auth-page"><form className="auth-card" onSubmit={event => void login(event)}>
     <h1>Paperlight</h1><p>登录后继续阅读你的论文与笔记</p>
     <label>用户名<input autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} required /></label>
-    <label>密码<input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} required /></label>
+    <label>密码<span className="auth-password-control"><input type={showPassword ? 'text' : 'password'} autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} required /><button type="button" className="auth-password-toggle" aria-label={showPassword ? '隐藏密码' : '显示密码'} aria-pressed={showPassword} onClick={() => setShowPassword(value => !value)}>{showPassword ? '隐藏' : '显示'}</button></span></label>
     {error && <span className="auth-error" role="alert">{error}</span>}
     <button type="submit">登录</button>
   </form></main>;

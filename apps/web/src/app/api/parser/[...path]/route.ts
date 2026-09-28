@@ -11,10 +11,14 @@ async function proxy(request: NextRequest, {params}: Context) {
   if (!allowed) return new Response('Not found', {status: 404});
   const origin = request.headers.get('origin');
   if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
-    if (origin) {
+    const fetchSite = request.headers.get('sec-fetch-site');
+    if (fetchSite === 'cross-site' || fetchSite === 'same-site') return Response.json({detail: 'Invalid request origin'}, {status: 403});
+    if (origin && fetchSite !== 'same-origin') {
       try {
         const publicOrigin = process.env.PAPERLIGHT_PUBLIC_ORIGIN;
-        if (origin !== request.nextUrl.origin && origin !== publicOrigin) return Response.json({detail: 'Invalid request origin'}, {status: 403});
+        const originHost = new URL(origin).host;
+        const requestHosts = [request.headers.get('host'), request.headers.get('x-forwarded-host')];
+        if (origin !== request.nextUrl.origin && origin !== publicOrigin && !requestHosts.includes(originHost)) return Response.json({detail: 'Invalid request origin'}, {status: 403});
       } catch {return Response.json({detail: 'Invalid request origin'}, {status: 403});}
     }
   }
