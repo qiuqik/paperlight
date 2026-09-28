@@ -256,6 +256,49 @@ def _embed_equation(old: dict, new_blocks: list[dict], index: int, equation: dic
     return False
 
 
+def _geometry_equation_anchor(old: dict, equation: dict, section_title: str) -> tuple[int, int] | None:
+    """Use a unique gap between adjacent paragraphs on the same PDF page."""
+    box = equation.get("bbox")
+    page = equation.get("page")
+    if not box or not page:
+        return None
+    title = clean_text(section_title).casefold()
+    sections = [(index, section) for index, section in enumerate(old.get("sections", []))
+                if clean_text(section.get("title", "")).casefold() == title]
+    if len(sections) != 1:
+        return None
+    section_index, section = sections[0]
+    blocks = section.get("blocks", [])
+    for block in blocks:
+        other = block.get("bbox")
+        if block.get("type") != "equation" or block.get("page") != page or not other:
+            continue
+        overlap = min(box["y"] + box["height"], other["y"] + other["height"]) - max(box["y"], other["y"])
+        if overlap > 0 or abs(box["y"] - other["y"]) < 25:
+            return None
+    candidates: list[tuple[int, int]] = []
+    for index in range(1, len(blocks)):
+        before, after = blocks[index - 1], blocks[index]
+        first, last = before.get("bbox"), after.get("bbox")
+        if before.get("type") != "paragraph" or after.get("type") != "paragraph":
+            continue
+        if before.get("page") != page or after.get("page") != page or not first or not last:
+            continue
+        before_bottom = first["y"] + first["height"]
+        equation_bottom = box["y"] + box["height"]
+        if not (before_bottom + 2 <= box["y"] and equation_bottom + 2 <= last["y"]):
+            continue
+        if last["y"] - before_bottom > 160:
+            continue
+        overlaps = [max(0, min(item["x"] + item["width"], box["x"] + box["width"])
+                        - max(item["x"], box["x"])) for item in (first, last)]
+        if any(overlap < min(item["width"], box["width"]) * 0.25
+               for overlap, item in zip(overlaps, (first, last))):
+            continue
+        candidates.append((section_index, index))
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def _add_anchored_equations(old: dict, new: dict) -> tuple[list[str], int, dict[str, int]]:
     """Insert cropped equations only between uniquely identified old neighbors."""
     existing_ids = set(_blocks(old))
@@ -278,6 +321,7 @@ def _add_anchored_equations(old: dict, new: dict) -> tuple[list[str], int, dict[
         for block_index, block in enumerate(section.get("blocks", [])):
             old_positions.setdefault(key(block), []).append((section_index, block_index))
     new_blocks = [block for section in new.get("sections", []) for block in section.get("blocks", [])]
+    new_titles = [section.get("title", "") for section in new.get("sections", []) for _ in section.get("blocks", [])]
     for index, equation in enumerate(new_blocks):
         if equation.get("type") != "equation":
             continue
@@ -304,23 +348,19 @@ def _add_anchored_equations(old: dict, new: dict) -> tuple[list[str], int, dict[
                     break
             anchors.append(anchor)
         before, after = anchors
-        if not before or not after:
-            skip("incomplete-anchors")
-            continue
-        if before[0] != after[0]:
-            skip("different-sections")
-            continue
-        if before[1] >= after[1]:
-            skip("conflicting-anchors")
-            continue
-        if abs((before[2] or 0) - (equation.get("page") or 0)) > 1:
-            skip("distant-anchor")
-            continue
-        if abs((after[2] or 0) - (equation.get("page") or 0)) > 1:
-            skip("distant-anchor")
-            continue
-        section_index = after[0]
-        insert_at = after[1]
+        issue = ("incomplete-anchors" if not before or not after else
+                 "different-sections" if before[0] != after[0] else
+                 "conflicting-anchors" if before[1] >= after[1] else
+                 "distant-anchor" if abs((before[2] or 0) - (equation.get("page") or 0)) > 1
+                 or abs((after[2] or 0) - (equation.get("page") or 0)) > 1 else None)
+        if issue:
+            geometry = _geometry_equation_anchor(old, equation, new_titles[index])
+            if not geometry:
+                skip(issue)
+                continue
+            section_index, insert_at = geometry
+        else:
+            section_index, insert_at = after[0], after[1]
         added = dict(equation)
         while added["id"] in existing_ids:
             added["id"] = f"added-{added['id']}"

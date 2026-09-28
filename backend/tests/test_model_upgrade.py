@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from backend.scripts.upgrade_legacy_models import _add_anchored_equations, _append_missing_appendix, _check_compatibility, _embed_equation, _joined_raw_bbox, _merge_geometry
+from backend.scripts.upgrade_legacy_models import _add_anchored_equations, _append_missing_appendix, _check_compatibility, _embed_equation, _geometry_equation_anchor, _joined_raw_bbox, _merge_geometry
 
 
 def model(*blocks):
@@ -137,6 +137,19 @@ class ModelUpgradeTests(unittest.TestCase):
         equation = {"type": "equation", "page": 2, "src": "equation.png"}
         self.assertFalse(_embed_equation(old, [dict(paragraph, text=before), equation,
                                                dict(paragraph, text=after)], 1, equation))
+
+    def test_geometry_anchor_finds_only_gap_between_adjacent_paragraphs(self) -> None:
+        before = {"type": "paragraph", "page": 5,
+                  "bbox": {"x": 108, "y": 380, "width": 396, "height": 54}}
+        after = {"type": "paragraph", "page": 5,
+                 "bbox": {"x": 108, "y": 520, "width": 228, "height": 107}}
+        old = {"sections": [{"title": "3.3 Theoretical Analysis", "blocks": [before, after]}]}
+        equation = {"type": "equation", "page": 5,
+                    "bbox": {"x": 110, "y": 440, "width": 360, "height": 12}}
+        self.assertEqual(_geometry_equation_anchor(old, equation, "3.3 Theoretical Analysis"), (0, 1))
+        self.assertIsNone(_geometry_equation_anchor(old, equation, "Another section"))
+        old["sections"][0]["blocks"].insert(1, {"type": "figure", "page": 5})
+        self.assertIsNone(_geometry_equation_anchor(old, equation, "3.3 Theoretical Analysis"))
 
     def test_disjoint_appendix_is_added_after_legacy_content(self) -> None:
         old = {"sections": [{"id": "body", "type": "body", "blocks": [
