@@ -64,6 +64,8 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const areaStart = useRef<{block: HTMLElement; surface: HTMLElement; x: number; y: number} | null>(null);
   const noteSyncTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const pendingCreates = useRef(new Map<string, Promise<void>>());
+  const localAnnotationWrites = useRef(new Map<string, Promise<void>>());
+  const serverNoteWrites = useRef(new Map<string, Promise<void>>());
   const prefs = usePreferences();
   const layout = useLayout();
   const setLayout = useLayout(state => state.set);
@@ -262,31 +264,45 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     return () => {cancelled = true;};
   }, [initialId, openDocument, openSavedDocument]);
 
+  const queueLocalAnnotationWrite = useCallback((record: Annotation): Promise<void> => {
+    const writes = localAnnotationWrites.current;
+    const previous = writes.get(record.id);
+    const next = (previous?.catch(() => {}) ?? Promise.resolve()).then(async () => {await saveAnnotation(record);});
+    writes.set(record.id, next);
+    const clear = () => {if (writes.get(record.id) === next) writes.delete(record.id);};
+    void next.then(clear, clear);
+    return next;
+  }, []);
+
   const addAnnotation = useCallback(async (record: Annotation) => {
     setAnnotations(current => [...current, record]);
     if (record.type === 'note') {setLayout({rightPanel: 'notes', rightOpen: true}); setNoteFocusId(record.id);}
     const pending = (async () => {
-      try {await saveAnnotation(record);} catch {setImportStatus('批注未能保存到浏览器');}
+      try {await queueLocalAnnotationWrite(record);} catch {setImportStatus('批注未能保存到浏览器');}
       if (serverId) {
         try {const response = await fetch(`/api/parser/api/documents/${serverId}/annotations`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(record)}); if (!response.ok) setImportStatus('批注仅保存在此浏览器，服务器同步失败');} catch {setImportStatus('批注仅保存在此浏览器，服务器同步失败');}
       }
     })();
     pendingCreates.current.set(record.id, pending);
     try {await pending;} finally {pendingCreates.current.delete(record.id);}
-  }, [serverId, setLayout]);
+  }, [queueLocalAnnotationWrite, serverId, setLayout]);
 
   const syncNote = (annotationId: string, note: string, remote: string) => {
-    void (async () => {
+    const writes = serverNoteWrites.current;
+    const previous = writes.get(annotationId);
+    const next = (previous?.catch(() => {}) ?? Promise.resolve()).then(async () => {
       await pendingCreates.current.get(annotationId);
       const response = await fetch(`/api/parser/api/documents/${remote}/annotations/${annotationId}`, {method: 'PATCH', headers: {'content-type': 'application/json'}, body: JSON.stringify({note})});
       if (!response.ok) throw new Error('Server note sync failed');
-    })()
-      .catch(() => setImportStatus('笔记仅保存在此浏览器，服务器同步失败'));
+    });
+    writes.set(annotationId, next);
+    const clear = () => {if (writes.get(annotationId) === next) writes.delete(annotationId);};
+    void next.then(clear, () => {clear(); setImportStatus('笔记仅保存在此浏览器，服务器同步失败');});
   };
-  const updateNote = async (record: Annotation, note: string) => {
+  const updateNote = (record: Annotation, note: string) => {
     const changed = {...record, note, updatedAt: Date.now()};
-    setAnnotations(current => current.map(item => item.id === record.id ? changed : item));
-    try {await saveAnnotation(changed);} catch {setImportStatus('笔记未能保存到浏览器');}
+    setAnnotations(current => current.map(item => item.id === record.id ? {...item, note, updatedAt: changed.updatedAt} : item));
+    void queueLocalAnnotationWrite(changed).catch(() => setImportStatus('笔记未能保存到浏览器'));
     const prior = noteSyncTimers.current.get(record.id);
     if (prior) clearTimeout(prior);
     if (serverId) noteSyncTimers.current.set(record.id, setTimeout(() => {
@@ -300,6 +316,8 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     setAnnotations(current => current.filter(item => item.id !== record.id));
     try {
       await pendingCreates.current.get(record.id);
+      await serverNoteWrites.current.get(record.id)?.catch(() => {});
+      await localAnnotationWrites.current.get(record.id)?.catch(() => {});
       if (serverId) {
         const response = await fetch(`/api/parser/api/documents/${serverId}/annotations/${record.id}`, {method: 'DELETE'});
         if (!response.ok && response.status !== 404) throw new Error(`Delete failed: ${response.status}`);
