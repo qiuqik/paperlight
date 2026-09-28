@@ -6,6 +6,7 @@ import demo from '@/data/demo.json';
 import type {Annotation, AreaAnchor, DocumentModel} from '@/lib/document';
 import {allBlocks, DOCUMENT_MODEL_VERSION, isTextAnchor, resolveAssetSources} from '@/lib/document';
 import {captureAnchor, renderTextHighlights, resolveAnchor} from '@/lib/anchors';
+import {refreshSavedDocument} from '@/lib/documentCache';
 import {deleteAnnotation, fingerprint, getDocument, getProgress, listAnnotations, listDocuments, saveAnnotation, saveDocument, saveProgress, type SavedDocument} from '@/lib/storage';
 import {useAnnotationUI, useLayout, usePreferences, type RightPanel, type Tool} from '@/lib/stores';
 
@@ -235,13 +236,21 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     try {history.replaceState({}, '', id === SAMPLE.id ? '/' : `/reader/${encodeURIComponent(id)}`);} catch {}
   }, [setLayout]);
 
+  const openSavedDocument = useCallback(async (entry: SavedDocument) => {
+    const refreshed = await refreshSavedDocument(entry);
+    if (refreshed !== entry) {
+      try {await saveDocument(refreshed);} catch {setImportStatus('文档已更新，但未能保存到此浏览器');}
+    }
+    await openDocument(refreshed.document, refreshed.id, refreshed.serverId);
+  }, [openDocument]);
+
   useEffect(() => {
     if (!initialId) return;
     let cancelled = false;
     (async () => {
       try {
         const saved = await getDocument(initialId);
-        if (saved && !cancelled) {await openDocument(saved.document, saved.id, saved.serverId); return;}
+        if (saved && !cancelled) {await openSavedDocument(saved); return;}
         const response = await fetch(`/api/parser/api/documents/${encodeURIComponent(initialId)}`);
         if (!response.ok) return;
         const state = await response.json() as ParserState;
@@ -249,7 +258,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
       } catch {}
     })();
     return () => {cancelled = true;};
-  }, [initialId, openDocument]);
+  }, [initialId, openDocument, openSavedDocument]);
 
   const addAnnotation = useCallback(async (record: Annotation) => {
     setAnnotations(current => [...current, record]);
@@ -348,7 +357,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     try {
       const hash = await fingerprint(file);
       const cached = await getDocument(hash);
-      if (cached?.document.modelVersion === DOCUMENT_MODEL_VERSION) {await openDocument(cached.document, hash, cached.serverId); setImportStatus(''); return;}
+      if (cached?.document.modelVersion === DOCUMENT_MODEL_VERSION) {setImportStatus(''); await openSavedDocument(cached); return;}
       const body = new FormData(); body.set('file', file);
       setImportStatus('正在上传 PDF…');
       const response = await fetch('/api/parser/api/documents', {method: 'POST', body});
@@ -424,7 +433,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
         {layout.rightPanel === 'notes' && (annotations.length ? annotations.map(item => <div className="note-card" key={item.id} style={{borderColor: item.color, background: `${item.color}18`}}><button className="note-quote" onClick={() => jumpToAnnotation(item)}>{isTextAnchor(item.anchor) ? `“${item.anchor.quote}”` : `第 ${item.anchor.page} 页区域`}</button>{(item.type === 'note' || !!item.note || openNoteEditors.has(item.id)) && <textarea aria-label="笔记内容" placeholder="输入笔记…" value={item.note || ''} autoFocus={noteFocusId === item.id} onFocus={() => setNoteFocusId(null)} onChange={event => void updateNote(item, event.target.value)} onBlur={event => {const timer = noteSyncTimers.current.get(item.id); if (timer && serverId) {clearTimeout(timer); noteSyncTimers.current.delete(item.id); syncNote(item.id, event.currentTarget.value, serverId);}}} />}<div className="note-footer"><span>{item.type}</span>{item.type !== 'note' && !item.note && !openNoteEditors.has(item.id) && <button onClick={() => {setOpenNoteEditors(current => new Set(current).add(item.id)); setNoteFocusId(item.id);}}>添加笔记</button>}<button onClick={() => void removeAnnotation(item)}>删除</button></div></div>) : <p className="empty-panel">选择文字后，笔记和标注会出现在这里。</p>)}
       </div></aside></div>
     {layout.settingsOpen && <div className="drawer-backdrop" onClick={() => layout.set({settingsOpen: false})}><aside className="settings-drawer" onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>阅读设置</h2><button aria-label="关闭设置" onClick={() => layout.set({settingsOpen: false})}><X size={20} /></button></div><label>字体<select value={prefs.fontFamily} onChange={event => prefs.set({fontFamily: event.target.value})}><option value="Georgia, serif">Georgia</option><option value="Arial, sans-serif">Arial</option><option value="'Times New Roman', serif">Times New Roman</option></select></label><label>字号 <b>{prefs.fontSize}px</b><input type="range" min="14" max="26" value={prefs.fontSize} onChange={event => prefs.set({fontSize: Number(event.target.value)})} /></label><label>行距 <b>{prefs.lineHeight.toFixed(1)}</b><input type="range" min="1.2" max="2.2" step="0.1" value={prefs.lineHeight} onChange={event => prefs.set({lineHeight: Number(event.target.value)})} /></label><label>阅读宽度 <b>{prefs.contentWidth}px</b><input type="range" min="600" max="1200" step="20" value={prefs.contentWidth} onChange={event => prefs.set({contentWidth: Number(event.target.value)})} /></label><label>主题<select value={prefs.theme} onChange={event => prefs.set({theme: event.target.value as typeof prefs.theme})}><option value="paper">纸张</option><option value="warm">暖色</option><option value="dark">深色</option><option value="custom">自定义</option></select></label>{prefs.theme === 'custom' && <div className="custom-theme-colors">{([['customApp', '界面背景'], ['customPaper', '纸张背景'], ['customText', '正文文字'], ['customAccent', '强调色']] as const).map(([key, label]) => <label key={key}>{label}<input type="color" value={prefs[key]} onChange={event => prefs.set({[key]: event.target.value})} /></label>)}</div>}<label>工具栏位置<select value={prefs.toolbarDock} onChange={event => prefs.set({toolbarDock: event.target.value as typeof prefs.toolbarDock})}><option value="top">顶部</option><option value="bottom">底部</option><option value="left">左侧</option><option value="right">右侧</option></select></label><label className="check-row"><input type="checkbox" checked={prefs.cachePdf} onChange={event => prefs.set({cachePdf: event.target.checked})} />新导入时在此浏览器缓存 PDF</label></aside></div>}
-    {layout.historyOpen && <div className="dialog-backdrop" onClick={() => layout.set({historyOpen: false})}><section className="history-dialog" onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>历史记录</h2><button aria-label="关闭历史记录" onClick={() => layout.set({historyOpen: false})}><X size={20} /></button></div><div className="history-tabs"><button className={historySource === 'local' ? 'active' : ''} onClick={() => void openHistory('local')}>此浏览器</button><button className={historySource === 'server' ? 'active' : ''} onClick={() => void openHistory('server')}>服务器</button></div><div className="history-list">{historySource === 'local' ? (localHistory.length ? localHistory.map(item => <button key={item.id} onClick={() => void openDocument(item.document, item.id, item.serverId)}><strong>{item.document.metadata.title}</strong><small>{item.filename} · {item.document.metadata.pageCount} 页</small></button>) : <p className="empty-panel">此浏览器还没有导入的论文。</p>) : <>
+    {layout.historyOpen && <div className="dialog-backdrop" onClick={() => layout.set({historyOpen: false})}><section className="history-dialog" onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>历史记录</h2><button aria-label="关闭历史记录" onClick={() => layout.set({historyOpen: false})}><X size={20} /></button></div><div className="history-tabs"><button className={historySource === 'local' ? 'active' : ''} onClick={() => void openHistory('local')}>此浏览器</button><button className={historySource === 'server' ? 'active' : ''} onClick={() => void openHistory('server')}>服务器</button></div><div className="history-list">{historySource === 'local' ? (localHistory.length ? localHistory.map(item => <button key={item.id} onClick={() => void openSavedDocument(item)}><strong>{item.document.metadata.title}</strong><small>{item.filename} · {item.document.metadata.pageCount} 页</small></button>) : <p className="empty-panel">此浏览器还没有导入的论文。</p>) : <>
       <h3>已解析文档</h3>{serverHistory.length ? serverHistory.map(item => <button key={item.documentId} onClick={() => void openServer(item.documentId).catch(error => setImportStatus(error.message))}><strong>{item.title}</strong><small>{item.pageCount} 页 · {item.status}</small></button>) : <p className="empty-panel">暂无已解析文档。</p>}
       <h3>服务器文件库</h3>{serverLibrary.length ? serverLibrary.map(item => <button key={item.id} onClick={() => void openLibrary(item.id, item.name)}><strong>{item.name}</strong><small>{item.folder === '.' ? '文件库根目录' : item.folder} · {(item.size / 1024 / 1024).toFixed(1)} MB</small></button>) : <p className="empty-panel">文件库为空，或解析服务未启动。</p>}
     </>}</div></section></div>}
