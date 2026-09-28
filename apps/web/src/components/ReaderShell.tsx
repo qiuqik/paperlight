@@ -61,6 +61,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const fileRef = useRef<HTMLInputElement>(null);
   const areaStart = useRef<{block: HTMLElement; x: number; y: number} | null>(null);
   const noteSyncTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const pendingCreates = useRef(new Map<string, Promise<void>>());
   const prefs = usePreferences();
   const layout = useLayout();
   const setLayout = useLayout(state => state.set);
@@ -179,23 +180,43 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     setProgress(0); setPaper(resolveAssetSources(document, remote)); setLocalId(documentKey); setServerId(remote);
     if (remote) {
       try {
-        const response = await fetch(`/api/parser/api/documents/${remote}/annotations`);
-        if (response.ok) {
+        const [response, deletionsResponse] = await Promise.all([
+          fetch(`/api/parser/api/documents/${remote}/annotations`),
+          fetch(`/api/parser/api/documents/${remote}/annotation-deletions`),
+        ]);
+        if (response.ok && deletionsResponse.ok) {
+          const deletedIds = new Set(await deletionsResponse.json() as string[]);
+          for (const item of saved) if (deletedIds.has(item.id)) await deleteAnnotation(item.id);
+          saved = saved.filter(item => !deletedIds.has(item.id));
           const remoteAnnotations = (await response.json() as Array<Annotation & {blockId?: string; start?: number; end?: number; quote?: string; mode?: string}>).map(item => {
             if (item.anchor) return item;
             const anchor = {start: {blockId: item.blockId || '', offset: item.start || 0}, end: {blockId: item.blockId || '', offset: item.end || 0}, quote: item.quote || '', prefix: '', suffix: ''};
             return {...item, type: item.note ? 'note' : item.mode === 'underline' ? 'underline' : 'highlight', anchor} as Annotation;
           });
           const merged = new Map(saved.map(item => [item.id, item]));
+          const remoteIds = new Set(remoteAnnotations.map(item => item.id));
           for (const item of remoteAnnotations) {
             if (!item.anchor) continue;
             const current = merged.get(item.id);
             const preserveUnsyncedNote = !!current?.note && !item.note && !item.updatedAt;
+            if (current && (preserveUnsyncedNote || annotationTime(current) > annotationTime(item)) && current.note !== item.note) {
+              try {
+                const update = await fetch(`/api/parser/api/documents/${remote}/annotations/${item.id}`, {method: 'PATCH', headers: {'content-type': 'application/json'}, body: JSON.stringify({note: current.note || ''})});
+                if (!update.ok) setImportStatus('笔记仅保存在此浏览器，服务器同步失败');
+              } catch {setImportStatus('笔记仅保存在此浏览器，服务器同步失败');}
+            }
             if (!current || (!preserveUnsyncedNote && annotationTime(item) > annotationTime(current))) {
               const incoming = {...item, documentId: documentKey};
               await saveAnnotation(incoming);
               merged.set(item.id, incoming);
             }
+          }
+          for (const item of saved) {
+            if (remoteIds.has(item.id) || !item.anchor) continue;
+            try {
+              const upload = await fetch(`/api/parser/api/documents/${remote}/annotations`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(item)});
+              if (!upload.ok) setImportStatus('批注仅保存在此浏览器，服务器同步失败');
+            } catch {setImportStatus('批注仅保存在此浏览器，服务器同步失败');}
           }
           saved = [...merged.values()];
         }
@@ -224,15 +245,22 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const addAnnotation = useCallback(async (record: Annotation) => {
     setAnnotations(current => [...current, record]);
     if (record.type === 'note') {setLayout({rightPanel: 'notes', rightOpen: true}); setNoteFocusId(record.id);}
-    try {await saveAnnotation(record);} catch {setImportStatus('批注未能保存到浏览器');}
-    if (serverId) {
-      try {const response = await fetch(`/api/parser/api/documents/${serverId}/annotations`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(record)}); if (!response.ok) setImportStatus('批注仅保存在此浏览器，服务器同步失败');} catch {setImportStatus('批注仅保存在此浏览器，服务器同步失败');}
-    }
+    const pending = (async () => {
+      try {await saveAnnotation(record);} catch {setImportStatus('批注未能保存到浏览器');}
+      if (serverId) {
+        try {const response = await fetch(`/api/parser/api/documents/${serverId}/annotations`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(record)}); if (!response.ok) setImportStatus('批注仅保存在此浏览器，服务器同步失败');} catch {setImportStatus('批注仅保存在此浏览器，服务器同步失败');}
+      }
+    })();
+    pendingCreates.current.set(record.id, pending);
+    try {await pending;} finally {pendingCreates.current.delete(record.id);}
   }, [serverId, setLayout]);
 
   const syncNote = (annotationId: string, note: string, remote: string) => {
-    void fetch(`/api/parser/api/documents/${remote}/annotations/${annotationId}`, {method: 'PATCH', headers: {'content-type': 'application/json'}, body: JSON.stringify({note})})
-      .then(response => {if (!response.ok) throw new Error('Server note sync failed');})
+    void (async () => {
+      await pendingCreates.current.get(annotationId);
+      const response = await fetch(`/api/parser/api/documents/${remote}/annotations/${annotationId}`, {method: 'PATCH', headers: {'content-type': 'application/json'}, body: JSON.stringify({note})});
+      if (!response.ok) throw new Error('Server note sync failed');
+    })()
       .catch(() => setImportStatus('笔记仅保存在此浏览器，服务器同步失败'));
   };
   const updateNote = async (record: Annotation, note: string) => {
@@ -247,9 +275,21 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     }, 400));
   };
   const removeAnnotation = async (record: Annotation) => {
+    const timer = noteSyncTimers.current.get(record.id);
+    if (timer) {clearTimeout(timer); noteSyncTimers.current.delete(record.id);}
     setAnnotations(current => current.filter(item => item.id !== record.id));
-    await deleteAnnotation(record.id);
-    if (serverId) await fetch(`/api/parser/api/documents/${serverId}/annotations/${record.id}`, {method: 'DELETE'}).catch(() => {});
+    try {
+      await pendingCreates.current.get(record.id);
+      if (serverId) {
+        const response = await fetch(`/api/parser/api/documents/${serverId}/annotations/${record.id}`, {method: 'DELETE'});
+        if (!response.ok && response.status !== 404) throw new Error(`Delete failed: ${response.status}`);
+      }
+    } catch {
+      setAnnotations(current => current.some(item => item.id === record.id) ? current : [...current, record]);
+      setImportStatus('删除未同步到服务器，请重试');
+      return;
+    }
+    try {await deleteAnnotation(record.id);} catch {setImportStatus('已从服务器删除，但未能清理此浏览器的副本');}
   };
   const onTextSelection = () => {
     if (annotationUI.activeTool === 'none' || annotationUI.activeTool === 'area' || !articleRef.current) return;

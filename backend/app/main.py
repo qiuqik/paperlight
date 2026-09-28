@@ -212,7 +212,16 @@ def _read_annotations(folder: Path) -> list[dict[str, Any]]:
         return []
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, list) else []
+        deleted = set(_read_annotation_deletions(folder))
+        return [item for item in value if isinstance(item, dict) and item.get("id") not in deleted] if isinstance(value, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _read_annotation_deletions(folder: Path) -> list[str]:
+    try:
+        value = json.loads((folder / "annotation-deletions.json").read_text(encoding="utf-8"))
+        return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
     except (OSError, ValueError):
         return []
 
@@ -277,6 +286,13 @@ def get_annotations(document_id: str) -> list[dict[str, Any]]:
     if not re.fullmatch(r"[a-f0-9]{32}", document_id) or not (DATA_DIR / document_id / "status.json").is_file():
         raise HTTPException(status_code=404, detail="Document not found.")
     return _read_annotations(DATA_DIR / document_id)
+
+
+@app.get("/api/documents/{document_id}/annotation-deletions")
+def get_annotation_deletions(document_id: str) -> list[str]:
+    if not re.fullmatch(r"[a-f0-9]{32}", document_id) or not (DATA_DIR / document_id / "status.json").is_file():
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return _read_annotation_deletions(DATA_DIR / document_id)
 
 
 @app.post("/api/documents/{document_id}/annotations", status_code=201)
@@ -350,6 +366,8 @@ def _create_v2_annotation(folder: Path, document_id: str, annotation: dict[str, 
     note = str(annotation.get("note") or "")[:5000]
     record = {"id": record_id, "documentId": document_id, "type": kind, "color": color, "anchor": anchor, "note": note, "createdAt": time.time()}
     with annotation_lock:
+        if record_id in _read_annotation_deletions(folder):
+            raise HTTPException(status_code=409, detail="Annotation was deleted.")
         records = _read_annotations(folder)
         if any(item.get("id") == record_id for item in records):
             return next(item for item in records if item.get("id") == record_id)
@@ -390,6 +408,11 @@ def delete_annotation(document_id: str, annotation_id: str) -> None:
         remaining = [record for record in records if record.get("id") != annotation_id]
         if len(remaining) == len(records):
             raise HTTPException(status_code=404, detail="Annotation not found.")
+        deletions = _read_annotation_deletions(folder)
+        deletions.append(annotation_id)
+        deleted_tmp = folder / "annotation-deletions.json.tmp"
+        deleted_tmp.write_text(json.dumps(deletions), encoding="utf-8")
+        deleted_tmp.replace(folder / "annotation-deletions.json")
         temporary = folder / "annotations.json.tmp"
         temporary.write_text(json.dumps(remaining, ensure_ascii=False), encoding="utf-8")
         temporary.replace(folder / "annotations.json")

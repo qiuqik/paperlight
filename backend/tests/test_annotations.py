@@ -46,6 +46,8 @@ class AnnotationApiTests(unittest.TestCase):
         self.assertEqual(records[0]["anchor"], note["anchor"])
         self.assertEqual(self.client.delete(f"/api/documents/{self.document_id}/annotations/{note['id']}").status_code, 204)
         self.assertEqual(self.client.get(f"/api/documents/{self.document_id}/annotations").json(), [])
+        self.assertEqual(self.client.get(f"/api/documents/{self.document_id}/annotation-deletions").json(), [note["id"]])
+        self.assertEqual(self.client.post(f"/api/documents/{self.document_id}/annotations", json=note).status_code, 409)
 
     def test_area_coordinates_are_normalized(self) -> None:
         area = {"type": "area", "color": "#f8d86a", "anchor": {"blockId": "figure-1", "page": 2, "bbox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4}}}
