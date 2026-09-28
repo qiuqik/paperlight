@@ -80,6 +80,9 @@ class AccountStore:
                     settings_json TEXT NOT NULL DEFAULT '{}', updated_at REAL NOT NULL
                 );
             """)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(documents)")}
+            if "favorite" not in columns:
+                db.execute("ALTER TABLE documents ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")
 
     def user_count(self) -> int:
         with self.connect() as db:
@@ -125,6 +128,22 @@ class AccountStore:
                 db.execute("UPDATE users SET password_hash=?,updated_at=? WHERE id=?", (PASSWORDS.hash(password), now, row["id"]))
             db.execute("UPDATE users SET last_login_at=? WHERE id=?", (now, row["id"]))
             return self.get_user(row["id"])
+
+    def change_password(self, user_id: str, current_password: str, new_password: str) -> bool:
+        if not 12 <= len(new_password) <= 1024:
+            raise ValueError("Password must be 12–1024 characters.")
+        with self.connect() as db:
+            row = db.execute("SELECT password_hash FROM users WHERE id=?", (user_id,)).fetchone()
+            if not row:
+                return False
+            try:
+                PASSWORDS.verify(row["password_hash"], current_password)
+            except (VerifyMismatchError, VerificationError):
+                return False
+            db.execute("UPDATE users SET password_hash=?,updated_at=? WHERE id=?",
+                       (PASSWORDS.hash(new_password), time.time(), user_id))
+            db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        return True
 
     def create_session(self, user_id: str) -> str:
         token = secrets.token_urlsafe(32)
@@ -210,6 +229,11 @@ class AccountStore:
     def touch_document(self, identifier: str) -> None:
         with self.connect() as db:
             db.execute("UPDATE documents SET last_opened_at=? WHERE id=?", (time.time(), identifier))
+
+    def set_favorite(self, identifier: str, favorite: bool) -> None:
+        with self.connect() as db:
+            db.execute("UPDATE documents SET favorite=?,updated_at=? WHERE id=?",
+                       (int(favorite), time.time(), identifier))
 
     def delete_document(self, identifier: str) -> None:
         with self.connect() as db:

@@ -156,6 +156,26 @@ def logout(request: Request, response: Response) -> None:
     response.delete_cookie(COOKIE_NAME, path="/")
 
 
+@app.patch("/api/profile")
+def update_profile(changes: dict[str, Any]) -> dict[str, Any]:
+    name = changes.get("displayName")
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
+        raise HTTPException(status_code=422, detail="Display name must be 1–80 characters.")
+    return ACCOUNTS.update_user(_user()["id"], display_name=name)
+
+
+@app.post("/api/profile/password", status_code=204)
+def change_password(changes: dict[str, Any]) -> None:
+    current, new = changes.get("currentPassword"), changes.get("newPassword")
+    if not isinstance(current, str) or not isinstance(new, str):
+        raise HTTPException(status_code=422, detail="Current and new passwords required.")
+    try:
+        if not ACCOUNTS.change_password(_user()["id"], current, new):
+            raise HTTPException(status_code=401, detail="Current password is incorrect.")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.get("/api/settings")
 def get_settings() -> dict[str, Any]:
     return ACCOUNTS.settings(_user()["id"])
@@ -437,10 +457,22 @@ def list_documents(request: Request) -> list[dict[str, Any]]:
             records.append({"documentId": item["id"], "fingerprint": item["fingerprint"],
                             "title": item["title"], "status": status.get("status", item["parse_status"]),
                             "createdAt": item["created_at"], "lastOpenedAt": item["last_opened_at"],
-                            "pageCount": item["page_count"], "annotationCount": len(ACCOUNTS.annotations(item["id"]))})
+                            "pageCount": item["page_count"], "annotationCount": len(ACCOUNTS.annotations(item["id"])),
+                            "authors": json.loads(item["authors"]), "favorite": bool(item["favorite"]),
+                            "progress": (ACCOUNTS.progress(owner_id, item["id"]) or {}).get("scroll_progress", 0)})
         except (OSError, ValueError, TypeError):
             continue
     return sorted(records, key=lambda item: item["createdAt"], reverse=True)
+
+
+@app.patch("/api/documents/{document_id}/favorite")
+def set_document_favorite(document_id: str, changes: dict[str, Any]) -> dict[str, bool]:
+    _document_record(document_id)
+    favorite = changes.get("favorite")
+    if not isinstance(favorite, bool):
+        raise HTTPException(status_code=422, detail="Favorite flag required.")
+    ACCOUNTS.set_favorite(document_id, favorite)
+    return {"favorite": favorite}
 
 
 def _library_items() -> list[tuple[str, Path, str]]:

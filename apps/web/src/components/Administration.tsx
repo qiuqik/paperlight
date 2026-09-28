@@ -2,6 +2,7 @@
 
 import {useCallback, useEffect, useState} from 'react';
 import type {Account} from './AppShell';
+import AccountMenu from './AccountMenu';
 
 type UserRow = Account & {disabled: number; document_count: number; last_login_at: number | null};
 type Paper = {documentId: string; title: string; pageCount: number; status: string};
@@ -75,7 +76,7 @@ export default function Administration({user, onLogout}: {user: Account; onLogou
     await loadUsers(); setMessage('论文已删除');
   };
 
-  return <main className="admin-page"><header><a href="/">Paperlight · 我的论文</a><span>管理员：{user.display_name}</span><button onClick={() => void onLogout()}>退出登录</button></header>
+  return <main className="admin-page"><header><a href="/">Paperlight · 我的论文</a><span>管理后台</span><AccountMenu user={user} onLogout={onLogout} /></header>
     <div className="admin-content"><section><h1>用户管理</h1><div className="admin-users">{users.map(item => <button key={item.id} className={selected?.id === item.id ? 'selected' : ''} onClick={() => void selectUser(item)}>
       <strong>{item.username}</strong><span>{item.role === 'admin' ? '管理员' : '用户'} · {item.document_count} 篇{item.disabled ? ' · 已停用' : ''}</span>
     </button>)}</div><form className="admin-create" onSubmit={event => void createUser(event)}><h2>创建用户</h2>

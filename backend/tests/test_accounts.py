@@ -93,6 +93,25 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(TestClient(main.app).post("/api/auth/login", json={"username": "charlie", "password": "charlie-password-123"}).status_code, 401)
         self.assertEqual(self.admin_client.delete(f"/api/admin/users/{created.json()['id']}").status_code, 204)
 
+    def test_library_metadata_favorites_and_profile(self) -> None:
+        doc = self.document_id
+        main.ACCOUNTS.update_document(doc, status="ready", authors=["Alice Researcher"], page_count=12)
+        self.assertEqual(self.alice_client.put(f"/api/documents/{doc}/progress", json={"percent": 37}).status_code, 200)
+        self.assertEqual(self.bob_client.patch(f"/api/documents/{doc}/favorite", json={"favorite": True}).status_code, 404)
+        self.assertEqual(self.alice_client.patch(f"/api/documents/{doc}/favorite", json={"favorite": True}).status_code, 200)
+        paper = self.alice_client.get("/api/documents").json()[0]
+        self.assertEqual(paper["authors"], ["Alice Researcher"])
+        self.assertEqual(paper["progress"], 37)
+        self.assertTrue(paper["favorite"])
+        self.assertEqual(self.bob_client.get("/api/documents").json(), [])
+        self.assertEqual(self.alice_client.patch("/api/profile", json={"displayName": "Alice A"}).json()["display_name"], "Alice A")
+        self.assertEqual(self.alice_client.post("/api/profile/password", json={"currentPassword": "wrong", "newPassword": "new-password-123"}).status_code, 401)
+        self.assertEqual(self.alice_client.post("/api/profile/password", json={"currentPassword": "alice-password-123", "newPassword": "new-password-123"}).status_code, 204)
+        self.assertEqual(self.alice_client.get("/api/auth/me").status_code, 401)
+        new_device = TestClient(main.app)
+        self.assertEqual(new_device.post("/api/auth/login", json={"username": "alice", "password": "new-password-123"}).status_code, 200)
+        self.assertEqual(new_device.get("/api/documents").json()[0]["favorite"], True)
+
     def test_logout_and_owned_document_deletion(self) -> None:
         self.assertEqual(self.alice_client.post("/api/auth/logout").status_code, 204)
         self.assertEqual(self.alice_client.get("/api/documents").status_code, 401)

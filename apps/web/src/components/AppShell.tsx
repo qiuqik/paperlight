@@ -4,10 +4,13 @@ import {useEffect, useState} from 'react';
 import {Eye, EyeOff} from 'lucide-react';
 import ReaderShell from './ReaderShell';
 import Administration from './Administration';
+import LibraryShell from './LibraryShell';
+import ProfileShell from './ProfileShell';
+import SettingsShell from './SettingsShell';
 
-export type Account = {id: string; username: string; display_name: string; role: 'admin' | 'user'};
+export type Account = {id: string; username: string; display_name: string; role: 'admin' | 'user'; created_at: number};
 
-export default function AppShell({initialId, administration = false}: {initialId?: string; administration?: boolean}) {
+export default function AppShell({initialId, administration = false, view = 'library'}: {initialId?: string; administration?: boolean; view?: 'library' | 'profile' | 'settings'}) {
   const [user, setUser] = useState<Account | null>(null);
   const [loading, setLoading] = useState(true);
   const [username, setUsername] = useState('');
@@ -54,5 +57,8 @@ export default function AppShell({initialId, administration = false}: {initialId
   if (administration) return user.role === 'admin'
     ? <Administration user={user} onLogout={logout} />
     : <main className="auth-page"><p>只有管理员可以访问此页面。</p><a href="/">返回阅读器</a></main>;
-  return <ReaderShell initialId={initialId} user={user} onLogout={logout} />;
+  if (initialId) return <ReaderShell initialId={initialId} user={user} onLogout={logout} />;
+  if (view === 'profile') return <ProfileShell user={user} onUserChange={setUser} onLogout={logout} />;
+  if (view === 'settings') return <SettingsShell user={user} onLogout={logout} />;
+  return <LibraryShell user={user} onLogout={logout} />;
 }
