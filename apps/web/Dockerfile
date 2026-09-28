@@ -2,7 +2,7 @@ FROM node:22-slim AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/web/package.json apps/web/package.json
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci --prefer-offline --no-audit --no-fund
 COPY apps/web apps/web
 RUN npm run build
 
