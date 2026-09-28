@@ -315,6 +315,80 @@ def _geometry_equation_anchor(old: dict, equation: dict, section_title: str) -> 
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _text_equation_anchor(old: dict, new_blocks: list[dict], index: int,
+                          section_title: str, pages: list[dict]) -> tuple[int, int] | None:
+    """Bridge uniquely matched legacy paragraphs using their source PDF boxes."""
+    equation = new_blocks[index]
+    box, page = equation.get("bbox"), equation.get("page")
+    if not box or not page:
+        return None
+
+    def neighbor(direction: int) -> dict | None:
+        for position in range(index + direction, len(new_blocks) if direction > 0 else -1, direction):
+            block = new_blocks[position]
+            if block.get("type") == "paragraph" and block.get("text") and block.get("bbox"):
+                return block
+            if block.get("type") != "equation":
+                break
+        return None
+
+    before, after = neighbor(-1), neighbor(1)
+    if not before or not after or before.get("page") != page:
+        return None
+    candidates: list[tuple[int, int, dict]] = []
+    for section_index, section in enumerate(old.get("sections", [])):
+        for block_index, block in enumerate(section.get("blocks", [])):
+            if (block.get("type") == "paragraph" and block.get("page") == before.get("page")
+                    and block.get("text", "").endswith(before["text"])):
+                candidates.append((section_index, block_index, block))
+    following: list[tuple[int, int, dict]] = []
+    for section_index, section in enumerate(old.get("sections", [])):
+        for block_index, block in enumerate(section.get("blocks", [])):
+            if (block.get("type") == "paragraph" and block.get("page") == after.get("page")
+                    and block.get("text", "").startswith(after["text"])):
+                following.append((section_index, block_index, block))
+    if len(candidates) != 1 or len(following) != 1:
+        return None
+    before_section, before_index, _ = candidates[0]
+    after_section, after_index, _ = following[0]
+    sections = old["sections"]
+    if _heading_key(sections[before_section].get("title", "")) != _heading_key(section_title):
+        return None
+    adjacent = ((before_section == after_section and after_index == before_index + 1)
+                or (after_section == before_section + 1 and before_index == len(sections[before_section]["blocks"]) - 1
+                    and after_index == 0))
+    if not adjacent:
+        return None
+
+    def same_column(other: dict) -> bool:
+        overlap = max(0, min(other["x"] + other["width"], box["x"] + box["width"])
+                      - max(other["x"], box["x"]))
+        return overlap >= min(other["width"], box["width"]) * 0.25
+
+    first, last = before["bbox"], after["bbox"]
+    if not same_column(first) or first["y"] + first["height"] + 2 > box["y"]:
+        return None
+    if after.get("page") == page:
+        if not same_column(last) or box["y"] + box["height"] + 2 > last["y"]:
+            return None
+    elif after.get("page") == page + 1:
+        current_page = next((item for item in pages if item.get("number") == page), None)
+        next_page = next((item for item in pages if item.get("number") == page + 1), None)
+        if not current_page or not next_page or box["y"] < current_page["height"] * 0.7 or last["y"] > next_page["height"] * 0.3:
+            return None
+    else:
+        return None
+    for section in sections:
+        for block in section.get("blocks", []):
+            other = block.get("bbox")
+            if block.get("type") != "equation" or block.get("page") != page or not other or not same_column(other):
+                continue
+            overlap = min(box["y"] + box["height"], other["y"] + other["height"]) - max(box["y"], other["y"])
+            if overlap > 0 or abs(box["y"] - other["y"]) < 10:
+                return None
+    return before_section, before_index + 1
+
+
 def _add_anchored_equations(old: dict, new: dict) -> tuple[list[str], int, dict[str, int]]:
     """Insert cropped equations only between uniquely identified old neighbors."""
     existing_ids = set(_blocks(old))
@@ -370,7 +444,8 @@ def _add_anchored_equations(old: dict, new: dict) -> tuple[list[str], int, dict[
                  "distant-anchor" if abs((before[2] or 0) - (equation.get("page") or 0)) > 1
                  or abs((after[2] or 0) - (equation.get("page") or 0)) > 1 else None)
         if issue:
-            geometry = _geometry_equation_anchor(old, equation, new_titles[index])
+            geometry = (_geometry_equation_anchor(old, equation, new_titles[index])
+                        or _text_equation_anchor(old, new_blocks, index, new_titles[index], new.get("pages", [])))
             if not geometry:
                 skip(issue)
                 continue

@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from backend.scripts.upgrade_legacy_models import _add_anchored_equations, _append_missing_appendix, _check_compatibility, _embed_equation, _geometry_equation_anchor, _joined_raw_bbox, _merge_geometry
+from backend.scripts.upgrade_legacy_models import _add_anchored_equations, _append_missing_appendix, _check_compatibility, _embed_equation, _geometry_equation_anchor, _joined_raw_bbox, _merge_geometry, _text_equation_anchor
 
 
 def model(*blocks):
@@ -172,6 +172,64 @@ class ModelUpgradeTests(unittest.TestCase):
         equation = {"type": "equation", "page": 3,
                     "bbox": {"x": 330, "y": 420, "width": 204, "height": 55}}
         self.assertEqual(_geometry_equation_anchor(old, equation, "3.2 From Wiggles to the Sine Illusion"), (0, 1))
+
+    def test_text_anchor_places_formula_before_merged_following_paragraph(self) -> None:
+        before_text = "The explanation before the displayed formula"
+        after_text = "The next paragraph starts with this explanation"
+        old = {"sections": [{"title": "5.4 Matching", "blocks": [
+            {"type": "paragraph", "page": 9, "text": before_text},
+            {"type": "paragraph", "page": 9, "text": after_text + " and continues after another formula"},
+        ]}]}
+        new_blocks = [
+            {"type": "paragraph", "page": 9, "text": before_text,
+             "bbox": {"x": 80, "y": 167, "width": 450, "height": 57}},
+            {"type": "equation", "page": 9,
+             "bbox": {"x": 210, "y": 229, "width": 320, "height": 54}},
+            {"type": "paragraph", "page": 9, "text": after_text,
+             "bbox": {"x": 80, "y": 288, "width": 450, "height": 21}},
+        ]
+        self.assertEqual(_text_equation_anchor(old, new_blocks, 1, "5.4 Matching", []), (0, 1))
+        new_blocks[1]["bbox"]["x"] = 540
+        self.assertIsNone(_text_equation_anchor(old, new_blocks, 1, "5.4 Matching", []))
+
+    def test_text_anchor_requires_page_boundary_for_cross_page_formula(self) -> None:
+        before_text = "The final paragraph on the PDF page"
+        after_text = "The opening paragraph on the next PDF page"
+        old = {"sections": [{"title": "2 Training", "blocks": [
+            {"type": "paragraph", "page": 2, "text": "Intro. " + before_text},
+            {"type": "paragraph", "page": 3, "text": after_text + " More detail."},
+        ]}]}
+        new_blocks = [
+            {"type": "paragraph", "page": 2, "text": before_text,
+             "bbox": {"x": 307, "y": 576, "width": 236, "height": 118}},
+            {"type": "equation", "page": 2,
+             "bbox": {"x": 346, "y": 708, "width": 196, "height": 10}},
+            {"type": "paragraph", "page": 3, "text": after_text,
+             "bbox": {"x": 55, "y": 70, "width": 216, "height": 10}},
+        ]
+        pages = [{"number": 2, "height": 792}, {"number": 3, "height": 792}]
+        self.assertEqual(_text_equation_anchor(old, new_blocks, 1, "2 Training", pages), (0, 1))
+        new_blocks[1]["bbox"]["y"] = 400
+        self.assertIsNone(_text_equation_anchor(old, new_blocks, 1, "2 Training", pages))
+
+    def test_text_anchor_appends_formula_before_next_section(self) -> None:
+        before_text = "from which we obtain the density"
+        after_text = "For text-conditional sampling of images"
+        old = {"sections": [
+            {"title": "3.1 Tailored SNR Samplers", "blocks": [
+                {"type": "paragraph", "page": 4, "text": "CosMap. " + before_text}]},
+            {"title": "4 Text-to-Image Architecture", "blocks": [
+                {"type": "paragraph", "page": 4, "text": after_text + " and further details."}]},
+        ]}
+        new_blocks = [
+            {"type": "paragraph", "page": 4, "text": before_text,
+             "bbox": {"x": 307, "y": 277, "width": 134, "height": 9}},
+            {"type": "equation", "page": 4,
+             "bbox": {"x": 325, "y": 297, "width": 217, "height": 24}},
+            {"type": "paragraph", "page": 4, "text": after_text,
+             "bbox": {"x": 307, "y": 356, "width": 234, "height": 56}},
+        ]
+        self.assertEqual(_text_equation_anchor(old, new_blocks, 1, "3.1 Tailored SNR Samplers", []), (0, 1))
 
     def test_disjoint_appendix_is_added_after_legacy_content(self) -> None:
         old = {"sections": [{"id": "body", "type": "body", "blocks": [
