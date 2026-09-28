@@ -9,12 +9,49 @@ from types import ModuleType
 from unittest.mock import patch
 
 from backend.app.model import Block, Section
-from backend.app.normalizer import _block_bbox, _formula_number, _heading_key, _merge_continuations, _merge_list_item, _place_figures_before_intro, _repair_heading, _reposition_figures, extract_pdf_references, normalize_docling
+from backend.app.normalizer import _block_bbox, _formula_number, _heading_key, _merge_continuations, _merge_list_item, _place_figures_before_intro, _render_picture_from_pdf, _repair_heading, _reposition_figures, extract_pdf_references, normalize_docling
 from backend.scripts.reorder_wide_figures import repair as repair_wide_figures
 from backend.scripts.repair_list_geometry import repair as repair_list_geometry
 
 
 class GeometryTests(unittest.TestCase):
+    def test_pdf_crop_falls_back_to_full_page_render_and_closes_document(self) -> None:
+        class FakeImage:
+            bounds = None
+            def crop(self, bounds):
+                self.bounds = bounds
+                return self
+            def save(self, path, format):
+                Path(path).write_bytes(b"PNG")
+
+        image = FakeImage()
+        calls = []
+        class FakePage:
+            def get_size(self): return (100, 100)
+            def render(self, **options):
+                calls.append(options)
+                if "crop" in options:
+                    raise RuntimeError("clipped render failed")
+                return SimpleNamespace(to_pil=lambda: image)
+        class FakePdf:
+            closed = False
+            def __getitem__(self, index): return FakePage()
+            def close(self): self.closed = True
+        fake_pdf = FakePdf()
+        pdfium = ModuleType("pypdfium2")
+        pdfium.PdfDocument = lambda path: fake_pdf
+        location = SimpleNamespace(page_no=1, bbox=SimpleNamespace(
+            l=10, b=60, r=40, t=80, coord_origin="BOTTOMLEFT"))
+        item = SimpleNamespace(prov=[location])
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(sys.modules, {"pypdfium2": pdfium}):
+            source, target = Path(temp_dir) / "source.pdf", Path(temp_dir) / "crop.png"
+            source.write_bytes(b"PDF")
+            self.assertTrue(_render_picture_from_pdf(source, item, target, margin=2))
+            self.assertEqual(target.read_bytes(), b"PNG")
+        self.assertEqual(image.bounds, (24, 54, 126, 126))
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(fake_pdf.closed)
+
     def test_list_item_merge_covers_all_items_on_one_page(self) -> None:
         first = Block(id="list", type="list", items=["First"], page=2,
                       bbox={"x": 50, "y": 100, "width": 220, "height": 30})

@@ -313,6 +313,7 @@ def _render_picture_from_pdf(pdf_path: Path, item: Any, asset_path: Path, margin
     """Use Docling's figure box and render pixels from the source PDF at 3x."""
     if not pdf_path.exists() or not getattr(item, "prov", None):
         return False
+    pdf = None
     try:
         import pypdfium2 as pdfium
 
@@ -335,18 +336,24 @@ def _render_picture_from_pdf(pdf_path: Path, item: Any, asset_path: Path, margin
         bounds = (max(0, round((left - margin) * scale)), max(0, round((y0 - margin) * scale)),
                   min(round(width * scale), round((right + margin) * scale)), min(round(height * scale), round((y1 + margin) * scale)))
         if bounds[2] - bounds[0] < 30 or bounds[3] - bounds[1] < 30:
-            pdf.close()
             return False
         # PDFium can rasterize only the requested rectangle. Rendering every
         # full page for each figure is particularly costly in long papers.
         crop = (bounds[0] / scale, (height * scale - bounds[3]) / scale,
                 (width * scale - bounds[2]) / scale, bounds[1] / scale)
-        image = page.render(scale=scale, crop=crop).to_pil()
+        try:
+            image = page.render(scale=scale, crop=crop).to_pil()
+        except Exception:
+            # Some PDF pages fail clipped rendering while a full-page render
+            # remains valid. Keep the same page-space crop as a fallback.
+            image = page.render(scale=scale).to_pil().crop(bounds)
         image.save(asset_path, format="PNG")
-        pdf.close()
         return True
     except Exception:
         return False
+    finally:
+        if pdf is not None:
+            pdf.close()
 
 
 def _caption(doc: Any, item: Any, source_text: Any = None) -> str:
