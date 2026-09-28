@@ -1,21 +1,22 @@
 'use client';
 import {useCallback, useEffect, useLayoutEffect, useRef, useState} from 'react';
-import {BookOpen, ChevronLeft, ChevronRight, Clock3, FilePlus2, Highlighter, Image, List, Maximize2, Palette, Scan, Settings2, StickyNote, Table2, Underline, X} from 'lucide-react';
+import {BookOpen, ChevronLeft, ChevronRight, Clock3, FilePlus2, Highlighter, Image, List, Maximize2, Scan, Settings2, StickyNote, Table2, Underline, X} from 'lucide-react';
 import DocumentRenderer from './DocumentRenderer';
 import demo from '@/data/demo.json';
 import type {Annotation, AreaAnchor, DocumentModel} from '@/lib/document';
 import {allBlocks, DOCUMENT_MODEL_VERSION, isTextAnchor, resolveAssetSources} from '@/lib/document';
 import {captureAnchor, renderTextHighlights, resolveAnchor} from '@/lib/anchors';
 import {refreshSavedDocument} from '@/lib/documentCache';
-import {deleteAnnotation, fingerprint, getDocument, getProgress, listAnnotations, listDocuments, saveAnnotation, saveDocument, saveProgress, type SavedDocument} from '@/lib/storage';
-import {useAnnotationUI, useLayout, usePreferences, type RightPanel, type Tool} from '@/lib/stores';
+import {authorizeLocalFolder, chooseLocalFolder, getFolderDocument, hasLocalFolder, listFolderEntries, openFolderPdf, removeFolderEntry, restoreLocalFolder, supportsLocalFolder, type FolderEntry} from '@/lib/localFolder';
+import {deleteAnnotation, fingerprint, getDocument, getProgress, listAnnotations, listDocuments, migrateBrowserDataToFolder, recordBrowserVisit, removeBrowserHistory, saveAnnotation, saveDocument, saveProgress, type SavedDocument} from '@/lib/storage';
+import {useAnnotationUI, useLayout, usePreferences, type MarkStyle, type RightPanel} from '@/lib/stores';
 
 const SAMPLE = resolveAssetSources(demo as DocumentModel);
 const COLORS = ['#f8d86a', '#ef7474', '#74b9e8', '#83cfa7', '#b9a1e6', '#b8bec6'];
 const PANELS: Array<{id: RightPanel; label: string}> = [{id: 'references', label: '参考文献'}, {id: 'figures', label: '图片'}, {id: 'tables', label: '表格'}, {id: 'notes', label: '笔记'}];
-const TOOLS: Array<{id: Tool; label: string; Icon: typeof Highlighter}> = [
+const MARK_STYLES: Array<{id: MarkStyle; label: string; Icon: typeof Highlighter}> = [
   {id: 'highlight', label: '高亮', Icon: Highlighter}, {id: 'underline', label: '下划线', Icon: Underline},
-  {id: 'area', label: '区域选择', Icon: Scan}, {id: 'note', label: '笔记', Icon: StickyNote},
+  {id: 'area', label: '区域选择', Icon: Scan},
 ];
 
 type ParserState = {documentId: string; status: string; stage?: string; progress?: number; document?: DocumentModel; error?: string};
@@ -50,7 +51,9 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [importStatus, setImportStatus] = useState('');
   const [historySource, setHistorySource] = useState<'local' | 'server'>('local');
-  const [localHistory, setLocalHistory] = useState<SavedDocument[]>([]);
+  const [localHistory, setLocalHistory] = useState<FolderEntry[]>([]);
+  const [folderInfo, setFolderInfo] = useState<{name: string; authorized: boolean} | null>(null);
+  const [folderReady, setFolderReady] = useState(false);
   const [serverHistory, setServerHistory] = useState<ServerRecord[]>([]);
   const [serverLibrary, setServerLibrary] = useState<LibraryRecord[]>([]);
   const [noteFocusId, setNoteFocusId] = useState<string | null>(null);
@@ -74,6 +77,15 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const tablesInOrder = [...paper.tables].sort((first, second) => (first.order ?? Infinity) - (second.order ?? Infinity));
 
   useEffect(() => {void usePreferences.persist.rehydrate();}, []);
+  useEffect(() => {
+    let cancelled = false;
+    void restoreLocalFolder().then(async info => {
+      if (info?.authorized) await migrateBrowserDataToFolder();
+      if (!cancelled) setFolderInfo(info);
+    }).catch(() => {if (!cancelled) setImportStatus('本地文件夹无法读取，请在设置中重新授权');})
+      .finally(() => {if (!cancelled) setFolderReady(true);});
+    return () => {cancelled = true;};
+  }, []);
   useEffect(() => {
     if (!targetReferenceId || !layout.rightOpen || layout.rightPanel !== 'references') return;
     const frame = requestAnimationFrame(() => {
@@ -200,7 +212,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
         ]);
         if (response.ok && deletionsResponse.ok) {
           const deletedIds = new Set(await deletionsResponse.json() as string[]);
-          for (const item of saved) if (deletedIds.has(item.id)) await deleteAnnotation(item.id);
+          for (const item of saved) if (deletedIds.has(item.id)) await deleteAnnotation(item.id, documentKey);
           saved = saved.filter(item => !deletedIds.has(item.id));
           const remoteAnnotations = (await response.json() as Array<Annotation & {blockId?: string; start?: number; end?: number; quote?: string; mode?: string}>).map(item => {
             if (item.anchor) return item;
@@ -216,8 +228,8 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
             if (current && (preserveUnsyncedNote || annotationTime(current) > annotationTime(item)) && current.note !== item.note) {
               try {
                 const update = await fetch(`/api/parser/api/documents/${remote}/annotations/${item.id}`, {method: 'PATCH', headers: {'content-type': 'application/json'}, body: JSON.stringify({note: current.note || ''})});
-                if (!update.ok) setImportStatus('笔记仅保存在此浏览器，服务器同步失败');
-              } catch {setImportStatus('笔记仅保存在此浏览器，服务器同步失败');}
+                if (!update.ok) setImportStatus('笔记未能同步到服务器');
+              } catch {setImportStatus('笔记未能同步到服务器');}
             }
             if (!current || (!preserveUnsyncedNote && annotationTime(item) > annotationTime(current))) {
               const incoming = {...item, documentId: documentKey};
@@ -229,27 +241,28 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
             if (remoteIds.has(item.id) || !item.anchor) continue;
             try {
               const upload = await fetch(`/api/parser/api/documents/${remote}/annotations`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(item)});
-              if (!upload.ok) setImportStatus('批注仅保存在此浏览器，服务器同步失败');
-            } catch {setImportStatus('批注仅保存在此浏览器，服务器同步失败');}
+              if (!upload.ok) setImportStatus('批注未能同步到服务器');
+            } catch {setImportStatus('批注未能同步到服务器');}
           }
           saved = [...merged.values()];
         }
       } catch {}
     }
     setAnnotations(saved); setLayout({historyOpen: false});
+    void recordBrowserVisit(documentKey, document.metadata.title, remote).catch(() => {});
     try {history.replaceState({}, '', id === SAMPLE.id ? '/' : `/reader/${encodeURIComponent(id)}`);} catch {}
   }, [setLayout]);
 
   const openSavedDocument = useCallback(async (entry: SavedDocument) => {
     const refreshed = await refreshSavedDocument(entry);
     if (refreshed !== entry) {
-      try {await saveDocument(refreshed);} catch {setImportStatus('文档已更新，但未能保存到此浏览器');}
+      try {await saveDocument(refreshed);} catch {setImportStatus('文档已更新，但未能保存到本地文件夹');}
     }
     await openDocument(refreshed.document, refreshed.id, refreshed.serverId);
   }, [openDocument]);
 
   useEffect(() => {
-    if (!initialId) return;
+    if (!initialId || !folderReady) return;
     let cancelled = false;
     (async () => {
       try {
@@ -262,7 +275,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
       } catch {}
     })();
     return () => {cancelled = true;};
-  }, [initialId, openDocument, openSavedDocument]);
+  }, [folderReady, initialId, openDocument, openSavedDocument]);
 
   const queueLocalAnnotationWrite = useCallback((record: Annotation): Promise<void> => {
     const writes = localAnnotationWrites.current;
@@ -276,11 +289,11 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
 
   const addAnnotation = useCallback(async (record: Annotation) => {
     setAnnotations(current => [...current, record]);
-    if (record.type === 'note') {setLayout({rightPanel: 'notes', rightOpen: true}); setNoteFocusId(record.id);}
+    if (record.type === 'note' || record.noteEnabled) {setLayout({rightPanel: 'notes', rightOpen: true}); setNoteFocusId(record.id);}
     const pending = (async () => {
-      try {await queueLocalAnnotationWrite(record);} catch {setImportStatus('批注未能保存到浏览器');}
+      try {await queueLocalAnnotationWrite(record);} catch {setImportStatus('批注未能保存到本地文件夹');}
       if (serverId) {
-        try {const response = await fetch(`/api/parser/api/documents/${serverId}/annotations`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(record)}); if (!response.ok) setImportStatus('批注仅保存在此浏览器，服务器同步失败');} catch {setImportStatus('批注仅保存在此浏览器，服务器同步失败');}
+        try {const response = await fetch(`/api/parser/api/documents/${serverId}/annotations`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(record)}); if (!response.ok) setImportStatus('批注未能同步到服务器');} catch {setImportStatus('批注未能同步到服务器');}
       }
     })();
     pendingCreates.current.set(record.id, pending);
@@ -297,12 +310,12 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     });
     writes.set(annotationId, next);
     const clear = () => {if (writes.get(annotationId) === next) writes.delete(annotationId);};
-    void next.then(clear, () => {clear(); setImportStatus('笔记仅保存在此浏览器，服务器同步失败');});
+    void next.then(clear, () => {clear(); setImportStatus('笔记未能同步到服务器');});
   };
   const updateNote = (record: Annotation, note: string) => {
     const changed = {...record, note, updatedAt: Date.now()};
     setAnnotations(current => current.map(item => item.id === record.id ? {...item, note, updatedAt: changed.updatedAt} : item));
-    void queueLocalAnnotationWrite(changed).catch(() => setImportStatus('笔记未能保存到浏览器'));
+    void queueLocalAnnotationWrite(changed).catch(() => setImportStatus('笔记未能保存到本地文件夹'));
     const prior = noteSyncTimers.current.get(record.id);
     if (prior) clearTimeout(prior);
     if (serverId) noteSyncTimers.current.set(record.id, setTimeout(() => {
@@ -327,18 +340,18 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
       setImportStatus('删除未同步到服务器，请重试');
       return;
     }
-    try {await deleteAnnotation(record.id);} catch {setImportStatus('已从服务器删除，但未能清理此浏览器的副本');}
+    try {await deleteAnnotation(record.id, record.documentId);} catch {setImportStatus('已从服务器删除，但未能清理本地文件夹的副本');}
   };
   const onTextSelection = () => {
-    if (annotationUI.activeTool === 'none' || annotationUI.activeTool === 'area' || !articleRef.current) return;
+    if (annotationUI.markStyle === 'area' || !articleRef.current) return;
     const anchor = captureAnchor(articleRef.current);
     if (!anchor) return;
-    const record: Annotation = {id: crypto.randomUUID(), documentId: localId, type: annotationUI.activeTool, color: prefs.activeColor, anchor, note: '', createdAt: Date.now()};
+    const record: Annotation = {id: crypto.randomUUID(), documentId: localId, type: annotationUI.noteEnabled ? 'note' : annotationUI.markStyle, style: annotationUI.markStyle, noteEnabled: annotationUI.noteEnabled, color: prefs.activeColor, anchor, note: '', createdAt: Date.now()};
     void addAnnotation(record);
     window.getSelection()?.removeAllRanges();
   };
   const onAreaStart = (event: React.PointerEvent<HTMLElement>) => {
-    if (annotationUI.activeTool !== 'area') return;
+    if (annotationUI.markStyle !== 'area') return;
     const block = (event.target as Element).closest<HTMLElement>('.area-target[data-block-id]');
     if (!block) return;
     const imageSurface = block.querySelector<HTMLElement>('.area-surface');
@@ -368,36 +381,74 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
       height: bbox.height * block.bbox.height / pageSize.height,
     } : bbox;
     const anchor: AreaAnchor = {blockId, page, bbox: pageBox, space: block?.bbox && pageSize ? 'page' : 'block', ...(start.surface !== start.block ? {surface: 'image' as const} : {})};
-    void addAnnotation({id: crypto.randomUUID(), documentId: localId, type: 'area', color: prefs.activeColor, anchor, createdAt: Date.now()});
+    void addAnnotation({id: crypto.randomUUID(), documentId: localId, type: 'area', noteEnabled: annotationUI.noteEnabled, color: prefs.activeColor, anchor, createdAt: Date.now()});
   };
 
-  const importPdf = async (file?: File) => {
+  const importPdf = async (file?: File, sourcePath?: string[]) => {
     if (!file) return;
     setImportStatus('正在检查本地记录…');
     try {
       const hash = await fingerprint(file);
       const cached = await getDocument(hash);
-      if (cached?.document.modelVersion === DOCUMENT_MODEL_VERSION) {setImportStatus(''); await openSavedDocument(cached); return;}
+      if (cached?.document.modelVersion === DOCUMENT_MODEL_VERSION) {
+        if (hasLocalFolder() && sourcePath) await saveDocument({...cached, sourcePath});
+        setImportStatus(''); await openSavedDocument(cached); return;
+      }
       const body = new FormData(); body.set('file', file);
       setImportStatus('正在上传 PDF…');
       const response = await fetch('/api/parser/api/documents', {method: 'POST', body});
       if (!response.ok) throw new Error(`上传失败 (${response.status})`);
       const state = await waitForDocument(await response.json() as ParserState, setImportStatus);
-      await saveDocument({id: hash, document: state.document, filename: file.name, savedAt: Date.now(), pdf: prefs.cachePdf ? file : undefined, serverId: state.documentId});
+      await saveDocument({id: hash, document: state.document, filename: file.name, savedAt: Date.now(), pdf: hasLocalFolder() && !sourcePath ? file : undefined, sourcePath, serverId: state.documentId});
       await openDocument(state.document, hash, state.documentId);
-      setImportStatus('');
+      setImportStatus(hasLocalFolder() ? '' : '已保存在服务器；选择本地文件夹后可在此设备保存 PDF');
     } catch (error) {setImportStatus(error instanceof Error ? error.message : '导入失败');}
     if (fileRef.current) fileRef.current.value = '';
   };
 
+  const selectFolder = async () => {
+    try {
+      const name = await chooseLocalFolder();
+      setFolderInfo({name, authorized: true});
+      const migrated = await migrateBrowserDataToFolder();
+      setImportStatus(migrated ? `已将 ${migrated} 条旧记录移入本地文件夹` : '本地文件夹已连接');
+      if (layout.historyOpen) await openHistory('local');
+    } catch (error) {if (!(error instanceof DOMException && error.name === 'AbortError')) setImportStatus(error instanceof Error ? error.message : '无法连接本地文件夹');}
+  };
+  const reauthorizeFolder = async () => {
+    try {
+      if (!await authorizeLocalFolder()) throw new Error('未获得文件夹读写权限');
+      await migrateBrowserDataToFolder();
+      setFolderInfo(info => info ? {...info, authorized: true} : info);
+      if (layout.historyOpen) await openHistory('local');
+    } catch (error) {setImportStatus(error instanceof Error ? error.message : '本地文件夹授权失败');}
+  };
+
   const openHistory = async (source: 'local' | 'server') => {
     setHistorySource(source); layout.set({historyOpen: true});
-    if (source === 'local') {try {setLocalHistory((await listDocuments()).sort((a, b) => b.savedAt - a.savedAt));} catch {setLocalHistory([]);}}
+    if (source === 'local') {
+      try {
+        const [folder, legacy] = await Promise.all([hasLocalFolder() ? listFolderEntries() : Promise.resolve([]), listDocuments()]);
+        setLocalHistory([...folder, ...legacy.filter(item => !folder.some(saved => saved.id === item.id))].sort((a, b) => b.savedAt - a.savedAt));
+      } catch {setImportStatus('本地文件夹读取失败'); setLocalHistory([]);}
+    }
     else {
       const [documents, library] = await Promise.allSettled([fetch('/api/parser/api/documents'), fetch('/api/parser/api/library')]);
       setServerHistory(documents.status === 'fulfilled' && documents.value.ok ? await documents.value.json() : []);
       setServerLibrary(library.status === 'fulfilled' && library.value.ok ? await library.value.json() : []);
     }
+  };
+  const openLocalEntry = async (entry: FolderEntry) => {
+    if ('document' in entry) await openSavedDocument(entry);
+    else await importPdf(await openFolderPdf(entry.sourcePath), entry.sourcePath);
+  };
+  const removeLocalEntry = async (entry: FolderEntry) => {
+    try {
+      const folderEntry = hasLocalFolder() ? 'document' in entry ? await getFolderDocument(entry.id) : entry : null;
+      if (folderEntry) await removeFolderEntry(folderEntry);
+      await removeBrowserHistory(entry.id);
+      setLocalHistory(current => current.filter(item => item.id !== entry.id));
+    } catch (error) {setImportStatus(error instanceof Error ? error.message : '移除本地记录失败');}
   };
   const openServer = async (id: string) => {
     const response = await fetch(`/api/parser/api/documents/${id}`);
@@ -435,25 +486,28 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   };
 
   const toolbar = <div className="annotation-tools" role="toolbar" aria-label="标注工具">
-    {TOOLS.map(({id, label, Icon}) => <button key={id} type="button" className={annotationUI.activeTool === id ? 'active' : ''} aria-label={label} title={label} aria-pressed={annotationUI.activeTool === id} onClick={() => annotationUI.setTool(annotationUI.activeTool === id ? 'none' : id)}><Icon size={18} /></button>)}
-    <div className="color-control"><button type="button" aria-label="选择标注颜色" title="标注颜色" onClick={() => setColorOpen(!colorOpen)}><span className="color-dot" style={{background: prefs.activeColor}} /><Palette size={14} /></button>{colorOpen && <div className="color-popover">{COLORS.map(color => <button key={color} type="button" title={color} aria-label={`颜色 ${color}`} style={{background: color}} onClick={() => {prefs.set({activeColor: color}); setColorOpen(false);}} />)}<input type="color" aria-label="自定义颜色" value={prefs.activeColor} onChange={event => prefs.set({activeColor: event.target.value})} /></div>}</div>
+    <div className="tool-group" role="group" aria-label="划线样式">{MARK_STYLES.map(({id, label, Icon}) => <button key={id} type="button" className={annotationUI.markStyle === id ? 'active' : ''} aria-label={label} title={label} aria-pressed={annotationUI.markStyle === id} onClick={() => annotationUI.setStyle(id)}><Icon size={18} /></button>)}</div>
+    <div className="tool-group" role="group" aria-label="笔记"><button type="button" className={annotationUI.noteEnabled ? 'active' : ''} aria-label="添加笔记" title="选择后添加笔记" aria-pressed={annotationUI.noteEnabled} onClick={() => annotationUI.setNoteEnabled(!annotationUI.noteEnabled)}><StickyNote size={18} /></button></div>
+    <div className="tool-group color-control" role="group" aria-label="颜色"><button type="button" className="gradient-trigger" aria-label="选择标注颜色" title="标注颜色" aria-expanded={colorOpen} onClick={() => setColorOpen(!colorOpen)}><span className="gradient-swatch" /><span className="selected-color" style={{background: prefs.activeColor}} /></button>{colorOpen && <div className="color-popover"><label className="gradient-picker" aria-label="自定义颜色"><input type="color" aria-label="自定义颜色" value={prefs.activeColor} onChange={event => prefs.set({activeColor: event.target.value})} /><span>自定义颜色</span></label><div className="color-presets">{COLORS.map(color => <button key={color} type="button" title={color} aria-label={`颜色 ${color}`} style={{background: color}} onClick={() => {prefs.set({activeColor: color}); setColorOpen(false);}} />)}</div></div>}</div>
   </div>;
 
-  return <div className={`reader-app theme-${prefs.theme} dock-${prefs.toolbarDock} ${layout.focus ? 'focus-mode' : ''} ${annotationUI.activeTool === 'area' ? 'area-mode' : ''}`} style={{'--reader-font': prefs.fontFamily, '--reader-size': `${prefs.fontSize}px`, '--reader-leading': prefs.lineHeight, '--reader-width': `${prefs.contentWidth}px`, '--custom-app': prefs.customApp, '--custom-paper': prefs.customPaper, '--custom-text': prefs.customText, '--custom-accent': prefs.customAccent} as React.CSSProperties}>
+  return <div className={`reader-app theme-${prefs.theme} dock-${prefs.toolbarDock} ${layout.focus ? 'focus-mode' : ''} ${annotationUI.markStyle === 'area' ? 'area-mode' : ''}`} style={{'--reader-font': prefs.fontFamily, '--reader-size': `${prefs.fontSize}px`, '--reader-leading': prefs.lineHeight, '--reader-width': `${prefs.contentWidth}px`, '--custom-app': prefs.customApp, '--custom-paper': prefs.customPaper, '--custom-text': prefs.customText, '--custom-accent': prefs.customAccent} as React.CSSProperties}>
     <header className="reader-topbar"><div className="brand"><BookOpen size={20} /><strong>Paperlight</strong></div><span className="top-title" title={paper.metadata.title}>{paper.metadata.title}</span>{prefs.toolbarDock === 'top' && toolbar}<div className="top-actions"><span className="read-time"><Clock3 size={15} /> {paper.metadata.readMinutes || '—'} min</span><button title="专注模式" aria-label="专注模式" aria-pressed={layout.focus} onClick={() => layout.set({focus: !layout.focus, leftOpen: layout.focus, rightOpen: layout.focus})}><Maximize2 size={18} /></button><button title="设置" aria-label="设置" onClick={() => layout.set({settingsOpen: true})}><Settings2 size={18} /></button><button title="历史记录" aria-label="历史记录" onClick={() => void openHistory('local')}><Clock3 size={18} /></button><button className="import-button" onClick={() => fileRef.current?.click()}><FilePlus2 size={16} /> 导入</button></div></header>
     {importStatus && <div className="status-banner" role="status">{importStatus}<button aria-label="关闭提示" onClick={() => setImportStatus('')}><X size={14} /></button></div>}
     <div className="reader-grid"><aside className={`left-panel ${layout.leftOpen ? 'open' : ''}`}><div className="panel-heading"><span>目录</span><button title="收起目录" onClick={() => layout.set({leftOpen: false})}><ChevronLeft size={16} /></button></div><nav>{paper.sections.map(section => <button key={section.id} className={`toc-item level-${section.level}`} onClick={() => document.getElementById(section.id)?.scrollIntoView({behavior: 'smooth'})}>{section.title}</button>)}</nav></aside>
       {(!layout.leftOpen || layout.focus) && <div className="side-rail"><button title="目录" aria-label="目录" aria-pressed={layout.leftOpen} onClick={() => layout.set({leftOpen: !layout.leftOpen})}><List size={19} /></button></div>}
       <main className="reading-column">{prefs.toolbarDock !== 'top' && <div className={`docked-tools docked-${prefs.toolbarDock}`}>{toolbar}</div>}<article ref={articleRef} className="reader-scroll" onMouseUp={onTextSelection} onPointerDown={onAreaStart} onPointerUp={onAreaEnd} onPointerCancel={() => {areaStart.current = null;}}><div className="paper-content"><DocumentRenderer document={paper} annotations={annotations} onReference={openReference} /></div></article><div className="reading-progress"><span style={{width: `${progress}%`}} /></div></main>
       {(!layout.rightOpen || layout.focus) && <div className="side-rail right-side">{PANELS.map(panel => {const Icon = panel.id === 'references' ? BookOpen : panel.id === 'figures' ? Image : panel.id === 'tables' ? Table2 : StickyNote; return <button key={panel.id} title={panel.label} aria-label={panel.label} aria-pressed={layout.rightOpen && layout.rightPanel === panel.id} onClick={() => layout.set({rightOpen: !(layout.rightOpen && layout.rightPanel === panel.id), rightPanel: panel.id})}><Icon size={18} /></button>;})}</div>}
-      <aside className={`right-panel ${layout.rightOpen ? 'open' : ''}`}><div className="panel-heading"><span>{PANELS.find(item => item.id === layout.rightPanel)?.label}</span><button title="收起面板" onClick={() => layout.set({rightOpen: false})}><ChevronRight size={16} /></button></div><div className="panel-tabs">{PANELS.map(panel => <button key={panel.id} className={layout.rightPanel === panel.id ? 'active' : ''} onClick={() => layout.set({rightPanel: panel.id})}>{panel.label}</button>)}</div><div className="panel-list">
+      <aside className={`right-panel ${layout.rightOpen ? 'open' : ''}`}><div className="panel-tabs">{PANELS.map(panel => <button key={panel.id} className={layout.rightPanel === panel.id ? 'active' : ''} onClick={() => layout.set({rightPanel: panel.id})}>{panel.label}</button>)}<button className="panel-collapse" title="收起面板" aria-label="收起面板" onClick={() => layout.set({rightOpen: false})}><ChevronRight size={16} /></button></div><div className="panel-list">
         {layout.rightPanel === 'references' && (paper.references.length ? paper.references.map(ref => <div className="reference-card" id={`ref-${ref.id}`} key={ref.id}><small>[{ref.number}] {ref.authors}</small><strong>{ref.title}</strong><span>{ref.venue} {ref.year}</span>{ref.preview && <p>{ref.preview}</p>}</div>) : <p className="empty-panel">暂无参考文献</p>)}
         {layout.rightPanel === 'figures' && (figuresInOrder.length ? figuresInOrder.map(item => <button className="asset-card" key={item.id} onClick={() => document.getElementById(item.id)?.scrollIntoView({behavior: 'smooth', block: 'center'})}>{item.src && <img src={item.src} alt="" />}<strong>{item.label || `Figure ${item.number}`}</strong><span>{item.caption}</span></button>) : <p className="empty-panel">暂无图片</p>)}
         {layout.rightPanel === 'tables' && (tablesInOrder.length ? tablesInOrder.map(item => <button className="asset-card" key={item.id} onClick={() => document.getElementById(item.id)?.scrollIntoView({behavior: 'smooth', block: 'center'})}><strong>{item.label || `Table ${item.number}`}</strong><span>{item.caption}</span></button>) : <p className="empty-panel">暂无表格</p>)}
-        {layout.rightPanel === 'notes' && (annotations.length ? annotations.map(item => <div className="note-card" key={item.id} style={{borderColor: item.color, background: `${item.color}18`}}><button className="note-quote" onClick={() => jumpToAnnotation(item)}>{isTextAnchor(item.anchor) ? `“${item.anchor.quote}”` : `第 ${item.anchor.page} 页区域`}</button>{(item.type === 'note' || !!item.note || openNoteEditors.has(item.id)) && <textarea aria-label="笔记内容" placeholder="输入笔记…" value={item.note || ''} autoFocus={noteFocusId === item.id} onFocus={() => setNoteFocusId(null)} onChange={event => void updateNote(item, event.target.value)} onBlur={event => {const timer = noteSyncTimers.current.get(item.id); if (timer && serverId) {clearTimeout(timer); noteSyncTimers.current.delete(item.id); syncNote(item.id, event.currentTarget.value, serverId);}}} />}<div className="note-footer"><span>{item.type}</span>{item.type !== 'note' && !item.note && !openNoteEditors.has(item.id) && <button onClick={() => {setOpenNoteEditors(current => new Set(current).add(item.id)); setNoteFocusId(item.id);}}>添加笔记</button>}<button onClick={() => void removeAnnotation(item)}>删除</button></div></div>) : <p className="empty-panel">选择文字后，笔记和标注会出现在这里。</p>)}
+        {layout.rightPanel === 'notes' && (annotations.length ? annotations.map(item => <div className="note-card" key={item.id} style={{borderColor: item.color, background: `${item.color}18`}}><button className="note-quote" onClick={() => jumpToAnnotation(item)}>{isTextAnchor(item.anchor) ? `“${item.anchor.quote}”` : `第 ${item.anchor.page} 页区域`}</button>{(item.type === 'note' || item.noteEnabled || !!item.note || openNoteEditors.has(item.id)) && <textarea aria-label="笔记内容" placeholder="输入笔记…" value={item.note || ''} autoFocus={noteFocusId === item.id} onFocus={() => setNoteFocusId(null)} onChange={event => void updateNote(item, event.target.value)} onBlur={event => {const timer = noteSyncTimers.current.get(item.id); if (timer && serverId) {clearTimeout(timer); noteSyncTimers.current.delete(item.id); syncNote(item.id, event.currentTarget.value, serverId);}}} />}<div className="note-footer"><span>{item.type === 'note' ? item.style === 'underline' ? '下划线 · 笔记' : '高亮 · 笔记' : item.type === 'area' ? item.noteEnabled ? '区域 · 笔记' : '区域' : item.type === 'underline' ? '下划线' : '高亮'}</span>{item.type !== 'note' && !item.noteEnabled && !item.note && !openNoteEditors.has(item.id) && <button onClick={() => {setOpenNoteEditors(current => new Set(current).add(item.id)); setNoteFocusId(item.id);}}>添加笔记</button>}<button onClick={() => void removeAnnotation(item)}>删除</button></div></div>) : <p className="empty-panel">选择文字后，笔记和标注会出现在这里。</p>)}
       </div></aside></div>
-    {layout.settingsOpen && <div className="drawer-backdrop" onClick={() => layout.set({settingsOpen: false})}><aside className="settings-drawer" onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>阅读设置</h2><button aria-label="关闭设置" onClick={() => layout.set({settingsOpen: false})}><X size={20} /></button></div><label>字体<select value={prefs.fontFamily} onChange={event => prefs.set({fontFamily: event.target.value})}><option value="Georgia, serif">Georgia</option><option value="Arial, sans-serif">Arial</option><option value="'Times New Roman', serif">Times New Roman</option></select></label><label>字号 <b>{prefs.fontSize}px</b><input type="range" min="14" max="26" value={prefs.fontSize} onChange={event => prefs.set({fontSize: Number(event.target.value)})} /></label><label>行距 <b>{prefs.lineHeight.toFixed(1)}</b><input type="range" min="1.2" max="2.2" step="0.1" value={prefs.lineHeight} onChange={event => prefs.set({lineHeight: Number(event.target.value)})} /></label><label>阅读宽度 <b>{prefs.contentWidth}px</b><input type="range" min="600" max="1200" step="20" value={prefs.contentWidth} onChange={event => prefs.set({contentWidth: Number(event.target.value)})} /></label><label>主题<select value={prefs.theme} onChange={event => prefs.set({theme: event.target.value as typeof prefs.theme})}><option value="paper">纸张</option><option value="warm">暖色</option><option value="dark">深色</option><option value="custom">自定义</option></select></label>{prefs.theme === 'custom' && <div className="custom-theme-colors">{([['customApp', '界面背景'], ['customPaper', '纸张背景'], ['customText', '正文文字'], ['customAccent', '强调色']] as const).map(([key, label]) => <label key={key}>{label}<input type="color" value={prefs[key]} onChange={event => prefs.set({[key]: event.target.value})} /></label>)}</div>}<label>工具栏位置<select value={prefs.toolbarDock} onChange={event => prefs.set({toolbarDock: event.target.value as typeof prefs.toolbarDock})}><option value="top">顶部</option><option value="bottom">底部</option><option value="left">左侧</option><option value="right">右侧</option></select></label><label className="check-row"><input type="checkbox" checked={prefs.cachePdf} onChange={event => prefs.set({cachePdf: event.target.checked})} />新导入时在此浏览器缓存 PDF</label></aside></div>}
-    {layout.historyOpen && <div className="dialog-backdrop" onClick={() => layout.set({historyOpen: false})}><section className="history-dialog" onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>历史记录</h2><button aria-label="关闭历史记录" onClick={() => layout.set({historyOpen: false})}><X size={20} /></button></div><div className="history-tabs"><button className={historySource === 'local' ? 'active' : ''} onClick={() => void openHistory('local')}>此浏览器</button><button className={historySource === 'server' ? 'active' : ''} onClick={() => void openHistory('server')}>服务器</button></div><div className="history-list">{historySource === 'local' ? (localHistory.length ? localHistory.map(item => <button key={item.id} onClick={() => void openSavedDocument(item)}><strong>{item.document.metadata.title}</strong><small>{item.filename} · {item.document.metadata.pageCount} 页</small></button>) : <p className="empty-panel">此浏览器还没有导入的论文。</p>) : <>
+    {layout.settingsOpen && <div className="drawer-backdrop" onClick={() => layout.set({settingsOpen: false})}><aside className="settings-drawer" onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>阅读设置</h2><button aria-label="关闭设置" onClick={() => layout.set({settingsOpen: false})}><X size={20} /></button></div><label>字体<select value={prefs.fontFamily} onChange={event => prefs.set({fontFamily: event.target.value})}><option value="Georgia, serif">Georgia</option><option value="Arial, sans-serif">Arial</option><option value="'Times New Roman', serif">Times New Roman</option></select></label><label>字号 <b>{prefs.fontSize}px</b><input type="range" min="14" max="26" value={prefs.fontSize} onChange={event => prefs.set({fontSize: Number(event.target.value)})} /></label><label>行距 <b>{prefs.lineHeight.toFixed(1)}</b><input type="range" min="1.2" max="2.2" step="0.1" value={prefs.lineHeight} onChange={event => prefs.set({lineHeight: Number(event.target.value)})} /></label><label>阅读宽度 <b>{prefs.contentWidth}px</b><input type="range" min="600" max="1200" step="20" value={prefs.contentWidth} onChange={event => prefs.set({contentWidth: Number(event.target.value)})} /></label><label>主题<select value={prefs.theme} onChange={event => prefs.set({theme: event.target.value as typeof prefs.theme})}><option value="paper">纸张</option><option value="warm">暖色</option><option value="dark">深色</option><option value="custom">自定义</option></select></label>{prefs.theme === 'custom' && <div className="custom-theme-colors">{([['customApp', '界面背景'], ['customPaper', '纸张背景'], ['customText', '正文文字'], ['customAccent', '强调色']] as const).map(([key, label]) => <label key={key}>{label}<input type="color" value={prefs[key]} onChange={event => prefs.set({[key]: event.target.value})} /></label>)}</div>}<label>工具栏位置<select value={prefs.toolbarDock} onChange={event => prefs.set({toolbarDock: event.target.value as typeof prefs.toolbarDock})}><option value="top">顶部</option><option value="bottom">底部</option><option value="left">左侧</option><option value="right">右侧</option></select></label><div className="folder-setting"><strong>本地文件夹</strong><p>{folderInfo?.authorized ? `已连接：${folderInfo.name}` : folderInfo ? `${folderInfo.name} 需要重新授权` : '尚未选择文件夹'}</p><div className="folder-actions">{folderInfo && !folderInfo.authorized && <button onClick={() => void reauthorizeFolder()}>重新授权</button>}<button onClick={() => void selectFolder()} disabled={!supportsLocalFolder()}>选择文件夹</button></div><small>浏览器不能仅凭输入的路径读取文件；选择后会记住此文件夹，获得授权时自动读取。PDF 和文档数据保存在所选文件夹。</small></div></aside></div>}
+    {layout.historyOpen && <div className="dialog-backdrop" onClick={() => layout.set({historyOpen: false})}><section className="history-dialog" onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>历史记录</h2><button aria-label="关闭历史记录" onClick={() => layout.set({historyOpen: false})}><X size={20} /></button></div><div className="history-tabs"><button className={historySource === 'local' ? 'active' : ''} onClick={() => void openHistory('local')}>本地文件夹</button><button className={historySource === 'server' ? 'active' : ''} onClick={() => void openHistory('server')}>服务器</button></div>
+      {historySource === 'local' && <div className="folder-history-controls"><span>{folderInfo?.authorized ? `已连接：${folderInfo.name}` : folderInfo ? `${folderInfo.name} 需要重新授权` : '尚未选择本地文件夹'}</span>{folderInfo && !folderInfo.authorized && <button onClick={() => void reauthorizeFolder()}>重新授权</button>}<button onClick={() => void selectFolder()} disabled={!supportsLocalFolder()}>选择文件夹</button></div>}
+      <div className="history-list">{historySource === 'local' ? (localHistory.length ? localHistory.map(item => <div className="history-row" key={item.id}><button className="history-open" onClick={() => void openLocalEntry(item).catch(error => setImportStatus(error instanceof Error ? error.message : '打开本地文档失败'))}><strong>{'document' in item ? item.document.metadata.title : item.filename}</strong><small>{item.filename}{'document' in item ? ` · ${item.document.metadata.pageCount} 页` : ' · 尚未解析'}</small></button><button className="history-remove" aria-label={`移除 ${item.filename} 的本地记录`} onClick={() => void removeLocalEntry(item)}>移除</button></div>) : <p className="empty-panel">请选择本地文件夹；PDF 会从所选文件夹读取。</p>) : <>
       <h3>已解析文档</h3>{serverHistory.length ? serverHistory.map(item => <button key={item.documentId} onClick={() => void openServer(item.documentId).catch(error => setImportStatus(error.message))}><strong>{item.title}</strong><small>{item.pageCount} 页 · {item.status}</small></button>) : <p className="empty-panel">暂无已解析文档。</p>}
       <h3>服务器文件库</h3>{serverLibrary.length ? serverLibrary.map(item => <button key={item.id} onClick={() => void openLibrary(item.id, item.name)}><strong>{item.name}</strong><small>{item.folder === '.' ? '文件库根目录' : item.folder} · {(item.size / 1024 / 1024).toFixed(1)} MB</small></button>) : <p className="empty-panel">文件库为空，或解析服务未启动。</p>}
     </>}</div></section></div>}

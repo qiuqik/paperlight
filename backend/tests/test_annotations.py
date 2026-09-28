@@ -49,6 +49,18 @@ class AnnotationApiTests(unittest.TestCase):
         self.assertEqual(self.client.get(f"/api/documents/{self.document_id}/annotation-deletions").json(), [note["id"]])
         self.assertEqual(self.client.post(f"/api/documents/{self.document_id}/annotations", json=note).status_code, 409)
 
+    def test_note_keeps_selected_underline_style(self) -> None:
+        note = {"id": "c" * 32, "documentId": self.document_id, "type": "note", "style": "underline",
+                "noteEnabled": True, "color": "#ef7474", "anchor": {"start": {"blockId": "p1", "offset": 0},
+                "end": {"blockId": "p1", "offset": 5}, "quote": "first", "prefix": "", "suffix": " block"}}
+        response = self.client.post(f"/api/documents/{self.document_id}/annotations", json=note)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["style"], "underline")
+        self.assertTrue(response.json()["noteEnabled"])
+        self.assertEqual(self.client.get(f"/api/documents/{self.document_id}/annotations").json()[0]["style"], "underline")
+        note["style"] = "invalid"
+        self.assertEqual(self.client.post(f"/api/documents/{self.document_id}/annotations", json=note).status_code, 422)
+
     def test_area_coordinates_are_normalized(self) -> None:
         area = {"type": "area", "color": "#f8d86a", "anchor": {"blockId": "figure-1", "page": 2, "bbox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4}}}
         self.assertEqual(self.client.post(f"/api/documents/{self.document_id}/annotations", json=area).status_code, 201)
@@ -68,7 +80,7 @@ class AnnotationApiTests(unittest.TestCase):
         old = {"blockId": "p1", "quote": "first", "start": 0, "end": 5, "mode": "highlight", "color": "#f8d86a"}
         self.assertEqual(self.client.post(f"/api/documents/{self.document_id}/annotations", json=old).status_code, 201)
 
-    def test_document_api_exposes_model_job_and_safe_delete(self) -> None:
+    def test_document_api_exposes_model_job_and_preserves_server_record(self) -> None:
         folder = main.DATA_DIR / self.document_id
         (folder / "status.json").write_text(json.dumps({"documentId": self.document_id, "status": "ready", "stage": "ready"}), encoding="utf-8")
         (folder / "document.json").write_text(json.dumps({"id": self.document_id, "metadata": {"title": "Test paper"}, "sections": []}), encoding="utf-8")
@@ -83,9 +95,9 @@ class AnnotationApiTests(unittest.TestCase):
             self.assertEqual(model.status_code, 200)
             self.assertEqual(model.json()["metadata"]["title"], "Test paper")
             self.assertEqual(model.json()["modelVersion"], 1)
-            self.assertEqual(self.client.delete(f"/api/documents/{self.document_id}").status_code, 204)
-            self.assertEqual(self.client.get(f"/api/documents/{self.document_id}").status_code, 404)
-            self.assertFalse(result_folder.exists())
+            self.assertEqual(self.client.delete(f"/api/documents/{self.document_id}").status_code, 405)
+            self.assertEqual(self.client.get(f"/api/documents/{self.document_id}").status_code, 200)
+            self.assertTrue(result_folder.exists())
         finally:
             main.RESULT_DIR = old_result_dir
 
@@ -93,7 +105,7 @@ class AnnotationApiTests(unittest.TestCase):
         folder = main.DATA_DIR / self.document_id
         (folder / "status.json").write_text(json.dumps({"documentId": self.document_id, "status": "processing"}), encoding="utf-8")
         self.assertEqual(self.client.get(f"/api/documents/{self.document_id}/model").status_code, 409)
-        self.assertEqual(self.client.delete(f"/api/documents/{self.document_id}").status_code, 409)
+        self.assertEqual(self.client.delete(f"/api/documents/{self.document_id}").status_code, 405)
         self.assertTrue(folder.is_dir())
 
     def test_annotation_id_routes_update_and_delete(self) -> None:

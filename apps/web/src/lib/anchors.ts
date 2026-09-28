@@ -103,7 +103,7 @@ export function renderTextHighlights(root: HTMLElement, annotations: Annotation[
     const key = `paperlight-${annotation.id.replace(/[^a-zA-Z0-9-]/g, '')}`;
     const color = /^#[0-9a-fA-F]{6}$/.test(annotation.color) ? annotation.color : '#f8d86a';
     registry.set(key, new HighlightClass(range));
-    style.textContent += annotation.type === 'underline'
+    style.textContent += (annotation.style || annotation.type) === 'underline'
       ? `::highlight(${key}){text-decoration:underline;text-decoration-color:${color};text-decoration-thickness:2px;background:transparent}`
       : `::highlight(${key}){background:${color}80;color:inherit}`;
     keys.push(key);

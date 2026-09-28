@@ -332,6 +332,12 @@ def _create_v2_annotation(folder: Path, document_id: str, annotation: dict[str, 
     kind = annotation.get("type")
     if kind not in {"highlight", "underline", "note", "area"}:
         raise HTTPException(status_code=422, detail="Invalid annotation type.")
+    style = annotation.get("style")
+    if style is not None and style not in {"highlight", "underline"}:
+        raise HTTPException(status_code=422, detail="Invalid annotation style.")
+    note_enabled = annotation.get("noteEnabled", False)
+    if not isinstance(note_enabled, bool):
+        raise HTTPException(status_code=422, detail="Invalid note setting.")
     color = str(annotation.get("color", ""))
     if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
         raise HTTPException(status_code=422, detail="Invalid annotation color.")
@@ -371,6 +377,10 @@ def _create_v2_annotation(folder: Path, document_id: str, annotation: dict[str, 
         record_id = uuid.uuid4().hex
     note = str(annotation.get("note") or "")[:5000]
     record = {"id": record_id, "documentId": document_id, "type": kind, "color": color, "anchor": anchor, "note": note, "createdAt": time.time()}
+    if style is not None:
+        record["style"] = style
+    if note_enabled:
+        record["noteEnabled"] = True
     with annotation_lock:
         if record_id in _read_annotation_deletions(folder):
             raise HTTPException(status_code=409, detail="Annotation was deleted.")
@@ -471,34 +481,6 @@ def get_document_model(document_id: str) -> DocumentModel:
     if state.status != "ready" or state.document is None:
         raise HTTPException(status_code=409, detail=state.error or "Document is not ready.")
     return state.document
-
-
-@app.delete("/api/documents/{document_id}", status_code=204)
-def delete_document(document_id: str) -> None:
-    if not re.fullmatch(r"[a-f0-9]{32}", document_id):
-        raise HTTPException(status_code=404, detail="Document not found.")
-    folder = DATA_DIR / document_id
-    if folder.is_symlink() or folder.resolve().parent != DATA_DIR.resolve():
-        raise HTTPException(status_code=404, detail="Document not found.")
-    with import_lock:
-        state = _get_job(document_id)
-        if state is None or not folder.is_dir():
-            raise HTTPException(status_code=404, detail="Document not found.")
-        if state.get("status") == "processing":
-            raise HTTPException(status_code=409, detail="Cannot delete a document while it is processing.")
-        try:
-            if RESULT_DIR is not None:
-                result_folder = RESULT_DIR / document_id
-                if result_folder.is_symlink() or result_folder.resolve().parent != RESULT_DIR.resolve():
-                    raise HTTPException(status_code=500, detail="Result folder is unsafe to delete.")
-                if result_folder.is_dir():
-                    shutil.rmtree(result_folder)
-            shutil.rmtree(folder)
-        except OSError as exc:
-            logger.exception("Could not delete document %s", document_id)
-            raise HTTPException(status_code=500, detail="Document could not be deleted.") from exc
-        with jobs_lock:
-            jobs.pop(document_id, None)
 
 
 @app.get("/api/documents/{document_id}/assets/{asset_name}")
