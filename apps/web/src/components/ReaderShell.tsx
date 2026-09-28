@@ -60,7 +60,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const articleRef = useRef<HTMLElement>(null);
   const readingAnchorRef = useRef<{blockId: string; blockOffset: number} | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  const areaStart = useRef<{block: HTMLElement; x: number; y: number} | null>(null);
+  const areaStart = useRef<{block: HTMLElement; surface: HTMLElement; x: number; y: number} | null>(null);
   const noteSyncTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const pendingCreates = useRef(new Map<string, Promise<void>>());
   const prefs = usePreferences();
@@ -312,15 +312,18 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     if (annotationUI.activeTool !== 'area') return;
     const block = (event.target as Element).closest<HTMLElement>('.area-target[data-block-id]');
     if (!block) return;
-    const rect = block.getBoundingClientRect();
-    areaStart.current = {block, x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height};
+    const imageSurface = block.querySelector<HTMLElement>('.area-surface');
+    if (imageSurface && !imageSurface.contains(event.target as Node)) return;
+    const surface = imageSurface || block;
+    const rect = surface.getBoundingClientRect();
+    areaStart.current = {block, surface, x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)), y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height))};
     block.setPointerCapture(event.pointerId);
   };
   const onAreaEnd = (event: React.PointerEvent<HTMLElement>) => {
     const start = areaStart.current;
     areaStart.current = null;
     if (!start) return;
-    const rect = start.block.getBoundingClientRect();
+    const rect = start.surface.getBoundingClientRect();
     const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
     const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
     const bbox = {x: Math.min(start.x, x), y: Math.min(start.y, y), width: Math.abs(x - start.x), height: Math.abs(y - start.y)};
@@ -335,7 +338,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
       width: bbox.width * block.bbox.width / pageSize.width,
       height: bbox.height * block.bbox.height / pageSize.height,
     } : bbox;
-    const anchor: AreaAnchor = {blockId, page, bbox: pageBox, space: block?.bbox && pageSize ? 'page' : 'block'};
+    const anchor: AreaAnchor = {blockId, page, bbox: pageBox, space: block?.bbox && pageSize ? 'page' : 'block', ...(start.surface !== start.block ? {surface: 'image' as const} : {})};
     void addAnnotation({id: crypto.randomUUID(), documentId: localId, type: 'area', color: prefs.activeColor, anchor, createdAt: Date.now()});
   };
 
@@ -412,7 +415,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     {importStatus && <div className="status-banner" role="status">{importStatus}<button aria-label="关闭提示" onClick={() => setImportStatus('')}><X size={14} /></button></div>}
     <div className="reader-grid"><aside className={`left-panel ${layout.leftOpen ? 'open' : ''}`}><div className="panel-heading"><span>目录</span><button title="收起目录" onClick={() => layout.set({leftOpen: false})}><ChevronLeft size={16} /></button></div><nav>{paper.sections.map(section => <button key={section.id} className={`toc-item level-${section.level}`} onClick={() => document.getElementById(section.id)?.scrollIntoView({behavior: 'smooth'})}>{section.title}</button>)}</nav></aside>
       {(!layout.leftOpen || layout.focus) && <div className="side-rail"><button title="目录" aria-label="目录" aria-pressed={layout.leftOpen} onClick={() => layout.set({leftOpen: !layout.leftOpen})}><List size={19} /></button></div>}
-      <main className="reading-column">{prefs.toolbarDock !== 'top' && <div className={`docked-tools docked-${prefs.toolbarDock}`}>{toolbar}</div>}<article ref={articleRef} className="reader-scroll" onMouseUp={onTextSelection} onPointerDown={onAreaStart} onPointerUp={onAreaEnd}><div className="paper-content"><DocumentRenderer document={paper} annotations={annotations} onReference={openReference} /></div></article><div className="reading-progress"><span style={{width: `${progress}%`}} /></div></main>
+      <main className="reading-column">{prefs.toolbarDock !== 'top' && <div className={`docked-tools docked-${prefs.toolbarDock}`}>{toolbar}</div>}<article ref={articleRef} className="reader-scroll" onMouseUp={onTextSelection} onPointerDown={onAreaStart} onPointerUp={onAreaEnd} onPointerCancel={() => {areaStart.current = null;}}><div className="paper-content"><DocumentRenderer document={paper} annotations={annotations} onReference={openReference} /></div></article><div className="reading-progress"><span style={{width: `${progress}%`}} /></div></main>
       {(!layout.rightOpen || layout.focus) && <div className="side-rail right-side">{PANELS.map(panel => {const Icon = panel.id === 'references' ? BookOpen : panel.id === 'figures' ? Image : panel.id === 'tables' ? Table2 : StickyNote; return <button key={panel.id} title={panel.label} aria-label={panel.label} aria-pressed={layout.rightOpen && layout.rightPanel === panel.id} onClick={() => layout.set({rightOpen: !(layout.rightOpen && layout.rightPanel === panel.id), rightPanel: panel.id})}><Icon size={18} /></button>;})}</div>}
       <aside className={`right-panel ${layout.rightOpen ? 'open' : ''}`}><div className="panel-heading"><span>{PANELS.find(item => item.id === layout.rightPanel)?.label}</span><button title="收起面板" onClick={() => layout.set({rightOpen: false})}><ChevronRight size={16} /></button></div><div className="panel-tabs">{PANELS.map(panel => <button key={panel.id} className={layout.rightPanel === panel.id ? 'active' : ''} onClick={() => layout.set({rightPanel: panel.id})}>{panel.label}</button>)}</div><div className="panel-list">
         {layout.rightPanel === 'references' && (paper.references.length ? paper.references.map(ref => <div className="reference-card" id={`ref-${ref.id}`} key={ref.id}><small>[{ref.number}] {ref.authors}</small><strong>{ref.title}</strong><span>{ref.venue} {ref.year}</span>{ref.preview && <p>{ref.preview}</p>}</div>) : <p className="empty-panel">暂无参考文献</p>)}
