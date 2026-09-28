@@ -151,6 +151,28 @@ class ModelUpgradeTests(unittest.TestCase):
         old["sections"][0]["blocks"].insert(1, {"type": "figure", "page": 5})
         self.assertIsNone(_geometry_equation_anchor(old, equation, "3.3 Theoretical Analysis"))
 
+    def test_geometry_anchor_uses_same_column_figure_gap_and_renumbered_section(self) -> None:
+        old = {"sections": [{"title": "5.1 Baseline Optimization", "blocks": [
+            {"type": "figure", "page": 4, "bbox": {"x": 292, "y": 38, "width": 253, "height": 52}},
+            {"type": "paragraph", "page": 4, "bbox": {"x": 293, "y": 175, "width": 252, "height": 69}},
+        ]}]}
+        equation = {"type": "equation", "page": 4,
+                    "bbox": {"x": 382, "y": 149, "width": 72, "height": 23}}
+        self.assertEqual(_geometry_equation_anchor(old, equation, "4.1 Baseline Optimization"), (0, 1))
+        equation["bbox"]["x"] = 50
+        self.assertIsNone(_geometry_equation_anchor(old, equation, "4.1 Baseline Optimization"))
+
+    def test_geometry_anchor_can_append_before_next_section_in_same_column(self) -> None:
+        old = {"sections": [
+            {"title": "4.2 From Wiggles to the Sine Illusion", "blocks": [
+                {"type": "paragraph", "page": 3, "bbox": {"x": 284, "y": 377, "width": 252, "height": 38}}]},
+            {"title": "5 SineStream", "blocks": [
+                {"type": "paragraph", "page": 3, "bbox": {"x": 283, "y": 509, "width": 252, "height": 50}}]},
+        ]}
+        equation = {"type": "equation", "page": 3,
+                    "bbox": {"x": 330, "y": 420, "width": 204, "height": 55}}
+        self.assertEqual(_geometry_equation_anchor(old, equation, "3.2 From Wiggles to the Sine Illusion"), (0, 1))
+
     def test_disjoint_appendix_is_added_after_legacy_content(self) -> None:
         old = {"sections": [{"id": "body", "type": "body", "blocks": [
             {"id": "p1", "type": "paragraph", "text": "Main", "page": 2}]}]}

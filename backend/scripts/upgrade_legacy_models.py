@@ -16,7 +16,7 @@ from pathlib import Path
 from docling_core.types.doc import DoclingDocument
 
 from backend.app.model import DOCUMENT_MODEL_VERSION
-from backend.app.normalizer import _block_bbox, clean_text, extract_pdf_references, normalize_docling, parse_grobid
+from backend.app.normalizer import _block_bbox, _heading_key, clean_text, extract_pdf_references, normalize_docling, parse_grobid
 
 
 def _blocks(model: dict) -> dict[str, dict]:
@@ -262,9 +262,9 @@ def _geometry_equation_anchor(old: dict, equation: dict, section_title: str) -> 
     page = equation.get("page")
     if not box or not page:
         return None
-    title = clean_text(section_title).casefold()
+    title = _heading_key(section_title)
     sections = [(index, section) for index, section in enumerate(old.get("sections", []))
-                if clean_text(section.get("title", "")).casefold() == title]
+                if _heading_key(section.get("title", "")) == title]
     if len(sections) != 1:
         return None
     section_index, section = sections[0]
@@ -280,7 +280,7 @@ def _geometry_equation_anchor(old: dict, equation: dict, section_title: str) -> 
     for index in range(1, len(blocks)):
         before, after = blocks[index - 1], blocks[index]
         first, last = before.get("bbox"), after.get("bbox")
-        if before.get("type") != "paragraph" or after.get("type") != "paragraph":
+        if before.get("type") not in {"paragraph", "figure"} or after.get("type") != "paragraph":
             continue
         if before.get("page") != page or after.get("page") != page or not first or not last:
             continue
@@ -296,6 +296,22 @@ def _geometry_equation_anchor(old: dict, equation: dict, section_title: str) -> 
                for overlap, item in zip(overlaps, (first, last))):
             continue
         candidates.append((section_index, index))
+    if section_index + 1 < len(old.get("sections", [])) and blocks:
+        before = blocks[-1]
+        next_blocks = old["sections"][section_index + 1].get("blocks", [])
+        after = next_blocks[0] if next_blocks else None
+        first, last = before.get("bbox"), after.get("bbox") if after else None
+        if (before.get("type") == "paragraph" and after and after.get("type") == "paragraph"
+                and before.get("page") == page and after.get("page") == page and first and last):
+            before_bottom = first["y"] + first["height"]
+            equation_bottom = box["y"] + box["height"]
+            overlaps = [max(0, min(item["x"] + item["width"], box["x"] + box["width"])
+                            - max(item["x"], box["x"])) for item in (first, last)]
+            if (before_bottom + 2 <= box["y"] and equation_bottom + 2 <= last["y"]
+                    and last["y"] - before_bottom <= 160
+                    and all(overlap >= min(item["width"], box["width"]) * 0.25
+                            for overlap, item in zip(overlaps, (first, last)))):
+                candidates.append((section_index, len(blocks)))
     return candidates[0] if len(candidates) == 1 else None
 
 
