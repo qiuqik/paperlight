@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from backend.app.model import Block, Section
 from backend.app.normalizer import _block_bbox, _formula_number, _heading_key, _merge_continuations, _place_figures_before_intro, _repair_heading, _reposition_figures, extract_pdf_references, normalize_docling
+from backend.scripts.reorder_wide_figures import repair as repair_wide_figures
 
 
 class GeometryTests(unittest.TestCase):
@@ -114,6 +115,63 @@ class GeometryTests(unittest.TestCase):
         _reposition_figures([section], geometry, figure_boxes)
 
         self.assertEqual([block.id for block in section.blocks], ["p1", "upper", "lower"])
+
+    def test_full_width_figure_precedes_both_columns_below_it(self) -> None:
+        left = Block(id="left", type="paragraph", page=12)
+        right = Block(id="right", type="paragraph", page=12)
+        figure = Block(id="figure", type="figure", page=12)
+        first = Section(id="earlier", title="Earlier", blocks=[left])
+        second = Section(id="later", title="Later", blocks=[figure, right])
+        geometry = {
+            "left": (12, (49, 147, 290, 286)),
+            "right": (12, (311, 343, 553, 504)),
+        }
+        figure_boxes = {"figure": (12, 48, 579, 552, 711)}
+
+        _reposition_figures([first, second], geometry, figure_boxes)
+
+        self.assertEqual([block.id for block in first.blocks], ["figure", "left"])
+        self.assertEqual([block.id for block in second.blocks], ["right"])
+
+    def test_full_width_figure_already_before_columns_stays_in_earlier_section(self) -> None:
+        figure = Block(id="figure", type="figure", page=12)
+        left = Block(id="left", type="paragraph", page=12)
+        right = Block(id="right", type="paragraph", page=12)
+        first = Section(id="earlier", title="Earlier", blocks=[figure])
+        second = Section(id="later", title="Later", blocks=[left, right])
+        geometry = {
+            "left": (12, (49, 147, 290, 286)),
+            "right": (12, (311, 343, 553, 504)),
+        }
+        figure_boxes = {"figure": (12, 48, 579, 552, 711)}
+
+        _reposition_figures([first, second], geometry, figure_boxes)
+
+        self.assertEqual([block.id for block in first.blocks], ["figure"])
+        self.assertEqual([block.id for block in second.blocks], ["left", "right"])
+
+    def test_saved_wide_figure_repair_preserves_text_and_anchor_ids(self) -> None:
+        model = {"modelVersion": 3, "pages": [{"number": 12, "height": 792}],
+                 "sections": [
+                     {"id": "earlier", "title": "Earlier", "blocks": [
+                         {"id": "left", "type": "paragraph", "text": "Left text", "page": 12,
+                          "bbox": {"x": 49, "y": 506, "width": 241, "height": 139}, "order": 0}]},
+                     {"id": "later", "title": "Later", "blocks": [
+                         {"id": "figure", "type": "figure", "page": 12,
+                          "bbox": {"x": 48, "y": 81, "width": 504, "height": 133}, "order": 1},
+                         {"id": "right", "type": "paragraph", "text": "Right text", "page": 12,
+                          "bbox": {"x": 311, "y": 288, "width": 242, "height": 161}, "order": 2}]}],
+                 "figures": [{"id": "figure", "type": "figure", "order": 1}]}
+
+        moved = repair_wide_figures(model)
+
+        self.assertEqual(moved, [{"figure": "figure", "page": 12, "before": "left"}])
+        self.assertEqual([block["id"] for section in model["sections"] for block in section["blocks"]],
+                         ["figure", "left", "right"])
+        self.assertEqual([block["text"] for section in model["sections"] for block in section["blocks"]
+                          if block["type"] == "paragraph"], ["Left text", "Right text"])
+        self.assertEqual(model["figures"][0]["order"], 0)
+        self.assertEqual(repair_wide_figures(model), [])
 
     def test_appendix_after_references_and_unreadable_formula_are_retained(self) -> None:
         def item(label: str, text: str, page: int):

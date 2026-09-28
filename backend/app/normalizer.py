@@ -437,11 +437,49 @@ def _merge_continuations(sections: list[Section], geometry: dict[str, tuple[int,
         section.blocks = merged
 
 
+def _wide_figure_anchor(sections: list[Section], geometry: dict[str, tuple[int, tuple[float, float, float, float]]],
+                        figure_box: tuple[int, float, float, float, float]) -> tuple[Section, Block] | None:
+    """Find the first body paragraph below a figure spanning two text columns."""
+    page, left, bottom, right, _top = figure_box
+    below: list[tuple[int, int, Section, Block, tuple[float, float, float, float]]] = []
+    for section_index, section in enumerate(sections):
+        if section.type == "abstract":
+            continue
+        for block_index, paragraph in enumerate(section.blocks):
+            if paragraph.type != "paragraph" or paragraph.id not in geometry:
+                continue
+            paragraph_page, box = geometry[paragraph.id]
+            p_left, _p_bottom, p_right, p_top = box
+            overlap = max(0.0, min(right, p_right) - max(left, p_left))
+            if (paragraph_page == page and p_top <= bottom + 2
+                    and overlap >= 0.4 * min(right - left, p_right - p_left)):
+                below.append((section_index, block_index, section, paragraph, box))
+    wide = any(
+        right - left >= 1.3 * max(first[4][2] - first[4][0], second[4][2] - second[4][0])
+        and (first[4][2] + 5 < second[4][0] or second[4][2] + 5 < first[4][0])
+        for index, first in enumerate(below) for second in below[index + 1:]
+    )
+    if not wide:
+        return None
+    _section_index, _block_index, section, anchor, _box = min(below, key=lambda item: (item[0], item[1]))
+    return section, anchor
+
+
 def _reposition_figures(sections: list[Section], geometry: dict[str, tuple[int, tuple[float, float, float, float]]], figure_boxes: dict[str, tuple[int, float, float, float, float]]) -> None:
-    """Move a misplaced figure next to the closest paragraph on its PDF page."""
+    """Move figures by PDF page geometry rather than their citation order."""
     located = [(section, block) for section in sections for block in section.blocks if block.type == "figure" and block.id in figure_boxes and not block.beforeHeading]
     for source, figure in located:
         page, left, bottom, right, top = figure_boxes[figure.id]
+        wide_anchor = _wide_figure_anchor(sections, geometry, figure_boxes[figure.id])
+        if wide_anchor:
+            target_section, anchor = wide_anchor
+            if sections.index(source) < sections.index(target_section) or (
+                source is target_section and source.blocks.index(figure) < source.blocks.index(anchor)
+            ):
+                continue
+            source.blocks.remove(figure)
+            target_section.blocks.insert(target_section.blocks.index(anchor), figure)
+            continue
         options: list[tuple[float, Section, Block, bool]] = []
         for section in sections:
             if section.type == "abstract":
