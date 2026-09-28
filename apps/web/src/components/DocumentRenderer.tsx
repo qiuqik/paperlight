@@ -5,6 +5,7 @@ import {isTextAnchor} from '@/lib/document';
 function Inline({nodes, onReference}: {nodes: InlineNode[]; onReference: (id: string) => void}) {
   return <>{nodes.map((node, index) => {
     const label = node.display || node.text || '';
+    if (node.type === 'inlineEquation' && node.src) return <span className="embedded-equation" data-equation-number={node.number != null ? `(${node.number})` : undefined} key={index}><img src={node.src} alt="原 PDF 公式" draggable={false} /></span>;
     if (node.type === 'citation') return <button className="inline-link" key={index} onClick={() => node.referenceIds?.[0] && onReference(node.referenceIds[0])}>{label}</button>;
     if (node.type === 'figureLink' || node.type === 'tableLink') return <button className="inline-link" key={index} onClick={() => document.getElementById(node.figureId || node.tableId || '')?.scrollIntoView({behavior: 'smooth'})}>{label}</button>;
     if (node.type === 'link' && /^https?:\/\//.test(node.href || '')) return <a key={index} href={node.href} target="_blank" rel="noreferrer">{label}</a>;

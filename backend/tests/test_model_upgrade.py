@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from backend.scripts.upgrade_legacy_models import _add_anchored_equations, _append_missing_appendix, _check_compatibility, _joined_raw_bbox, _merge_geometry
+from backend.scripts.upgrade_legacy_models import _add_anchored_equations, _append_missing_appendix, _check_compatibility, _embed_equation, _joined_raw_bbox, _merge_geometry
 
 
 def model(*blocks):
@@ -112,6 +112,31 @@ class ModelUpgradeTests(unittest.TestCase):
         self.assertEqual(assets, [])
         self.assertEqual(unplaced, 1)
         self.assertEqual(reasons, {"incomplete-anchors": 1})
+
+    def test_formula_crop_is_embedded_without_changing_merged_paragraph_text(self) -> None:
+        before, after = "The method before the formula", "The explanation after the formula"
+        paragraph = {"id": "old", "type": "paragraph", "page": 2, "text": f"{before} {after}",
+                     "content": [{"type": "text", "text": before}, {"type": "text", "text": " "},
+                                 {"type": "text", "text": after}]}
+        old = model(paragraph)
+        equation = {"id": "eq", "type": "equation", "page": 2,
+                    "bbox": {"x": 1, "y": 2, "width": 3, "height": 4},
+                    "src": "/api/documents/abc/assets/eq.png", "number": 4}
+        new = model({"type": "paragraph", "text": before, "page": 2}, equation,
+                    {"type": "paragraph", "text": after, "page": 2})
+        assets, unplaced, reasons = _add_anchored_equations(old, new)
+        self.assertEqual((assets, unplaced, reasons), (["eq.png"], 0, {}))
+        self.assertEqual(paragraph["text"], f"{before} {after}")
+        self.assertEqual("".join(item.get("text", "") for item in paragraph["content"]), paragraph["text"])
+        self.assertEqual(paragraph["content"][1]["src"], equation["src"])
+
+    def test_ambiguous_merged_paragraph_does_not_embed_formula(self) -> None:
+        before, after = "The method before the formula", "The explanation after the formula"
+        paragraph = {"type": "paragraph", "page": 2, "text": f"{before} {after}"}
+        old = model(dict(paragraph), dict(paragraph))
+        equation = {"type": "equation", "page": 2, "src": "equation.png"}
+        self.assertFalse(_embed_equation(old, [dict(paragraph, text=before), equation,
+                                               dict(paragraph, text=after)], 1, equation))
 
     def test_disjoint_appendix_is_added_after_legacy_content(self) -> None:
         old = {"sections": [{"id": "body", "type": "body", "blocks": [

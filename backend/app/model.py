@@ -18,6 +18,8 @@ class InlineNode(BaseModel):
     figureId: str | None = None
     tableId: str | None = None
     unresolved: bool = False
+    src: str | None = None
+    number: int | None = None
 
 
 class Block(BaseModel):

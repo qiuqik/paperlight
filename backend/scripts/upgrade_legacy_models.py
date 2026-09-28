@@ -195,12 +195,74 @@ def _merge_geometry(old: dict, new: dict, docling_document=None, pdf_document=No
                                       for block in before.values())}
 
 
+def _embed_equation(old: dict, new_blocks: list[dict], index: int, equation: dict) -> bool:
+    """Insert a crop between two raw text fragments without changing anchor text."""
+    page = equation.get("page")
+
+    def neighbor(direction: int) -> dict | None:
+        for position in range(index + direction, len(new_blocks) if direction > 0 else -1, direction):
+            block = new_blocks[position]
+            if block.get("type") == "paragraph" and block.get("page") == page and block.get("text"):
+                return block
+            if block.get("type") != "equation":
+                break
+        return None
+
+    before, after = neighbor(-1), neighbor(1)
+    if not before or not after:
+        return False
+    before_text, after_text = before["text"], after["text"]
+    matches: list[tuple[dict, int]] = []
+    for section in old.get("sections", []):
+        for block in section.get("blocks", []):
+            if block.get("type") != "paragraph" or block.get("page") != page:
+                continue
+            text = block.get("text", "")
+            first = text.find(before_text)
+            second = text.find(after_text)
+            if first < 0 or second < 0 or first != text.rfind(before_text) or second != text.rfind(after_text):
+                continue
+            offset = first + len(before_text)
+            if second <= offset or text[offset:second].strip() or second - offset > 2:
+                continue
+            content = block.get("content") or [{"type": "text", "text": text}]
+            rendered = "".join(item.get("display") or item.get("text") or "" for item in content)
+            if rendered == text:
+                matches.append((block, offset))
+    if len(matches) != 1:
+        return False
+    block, offset = matches[0]
+    content = block.get("content") or [{"type": "text", "text": block["text"]}]
+    inline = {"type": "inlineEquation", "text": "", "src": equation["src"], "number": equation.get("number")}
+    cursor = 0
+    for position, node in enumerate(content):
+        value = node.get("display") or node.get("text") or ""
+        end = cursor + len(value)
+        if end == offset:
+            insertion = position + 1
+            while insertion < len(content) and content[insertion].get("type") == "inlineEquation":
+                insertion += 1
+            content.insert(insertion, inline)
+            block["content"] = content
+            return True
+        if cursor < offset < end and node.get("type") == "text" and not node.get("display"):
+            split = offset - cursor
+            content[position:position + 1] = [
+                {**node, "text": value[:split]}, inline, {**node, "text": value[split:]},
+            ]
+            block["content"] = content
+            return True
+        cursor = end
+    return False
+
+
 def _add_anchored_equations(old: dict, new: dict) -> tuple[list[str], int, dict[str, int]]:
     """Insert cropped equations only between uniquely identified old neighbors."""
     existing_ids = set(_blocks(old))
-    existing_assets = {block.get("src") for block in _blocks(old).values() if block.get("src")}
+    existing_assets = {src for block in _blocks(old).values()
+                       for src in [block.get("src"), *(item.get("src") for item in block.get("content", []))] if src}
     planned: dict[int, list[tuple[int, int, dict]]] = {}
-    equation_count = 0
+    embedded_assets: list[str] = []
     source_order = 0
     skipped: dict[str, int] = {}
 
@@ -219,9 +281,15 @@ def _add_anchored_equations(old: dict, new: dict) -> tuple[list[str], int, dict[
     for index, equation in enumerate(new_blocks):
         if equation.get("type") != "equation":
             continue
-        equation_count += 1
-        if not equation.get("bbox") or not equation.get("src") or equation["src"] in existing_assets:
+        if equation.get("src") in existing_assets:
+            skip("already-present")
+            continue
+        if not equation.get("bbox") or not equation.get("src"):
             skip("crop")
+            continue
+        if _embed_equation(old, new_blocks, index, equation):
+            existing_assets.add(equation["src"])
+            embedded_assets.append(Path(equation["src"]).name)
             continue
         anchors = []
         for direction in (-1, 1):
@@ -261,7 +329,7 @@ def _add_anchored_equations(old: dict, new: dict) -> tuple[list[str], int, dict[
         planned.setdefault(section_index, []).append((insert_at, source_order, added))
         source_order += 1
 
-    assets: list[str] = []
+    assets: list[str] = embedded_assets.copy()
     for section_index, insertions in planned.items():
         blocks = old["sections"][section_index]["blocks"]
         for offset, (index, _source_order, block) in enumerate(sorted(insertions)):
@@ -269,7 +337,7 @@ def _add_anchored_equations(old: dict, new: dict) -> tuple[list[str], int, dict[
             assets.append(Path(block["src"]).name)
     for order, block in enumerate(block for section in old.get("sections", []) for block in section.get("blocks", [])):
         block["order"] = order
-    return assets, equation_count - len(assets), skipped
+    return assets, sum(count for reason, count in skipped.items() if reason != "already-present"), skipped
 
 
 def _append_missing_appendix(old: dict, new: dict) -> tuple[list[str], int, int]:
