@@ -1,6 +1,7 @@
 'use client';
 
 import {useEffect, useState} from 'react';
+import {Eye, EyeOff} from 'lucide-react';
 import ReaderShell from './ReaderShell';
 import Administration from './Administration';
 
@@ -46,7 +47,7 @@ export default function AppShell({initialId, administration = false}: {initialId
   if (!user) return <main className="auth-page"><form className="auth-card" onSubmit={event => void login(event)}>
     <h1>Paperlight</h1><p>登录后继续阅读你的论文与笔记</p>
     <label>用户名<input autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} required /></label>
-    <label>密码<span className="auth-password-control"><input type={showPassword ? 'text' : 'password'} autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} required /><button type="button" className="auth-password-toggle" aria-label={showPassword ? '隐藏密码' : '显示密码'} aria-pressed={showPassword} onClick={() => setShowPassword(value => !value)}>{showPassword ? '隐藏' : '显示'}</button></span></label>
+    <label>密码<span className="auth-password-control"><input type={showPassword ? 'text' : 'password'} autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} required /><button type="button" className="auth-password-toggle" title={showPassword ? '隐藏密码' : '显示密码'} aria-label={showPassword ? '隐藏密码' : '显示密码'} aria-pressed={showPassword} onClick={() => setShowPassword(value => !value)}>{showPassword ? <EyeOff size={18} /> : <Eye size={18} />}</button></span></label>
     {error && <span className="auth-error" role="alert">{error}</span>}
     <button type="submit">登录</button>
   </form></main>;
