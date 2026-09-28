@@ -394,7 +394,7 @@ def _university_author_names(value: str) -> list[str]:
 
 
 def _merge_continuations(sections: list[Section], geometry: dict[str, tuple[int, tuple[float, float, float, float]]]) -> None:
-    """Join Docling fragments only when text and page geometry indicate continuation."""
+    """Join nearby fragments while keeping one truthful page and bounding box."""
     for section in sections:
         merged: list[Block] = []
         for block in section.blocks:
@@ -408,12 +408,12 @@ def _merge_continuations(sections: list[Section], geometry: dict[str, tuple[int,
                 if prior and following:
                     first_page, (left, bottom, right, top) = prior
                     next_page, (next_left, next_bottom, next_right, next_top) = following
-                    close_in_order = next_page == first_page + 1 or (
-                        next_page == first_page and (
-                            (abs(next_left - left) < 20 and bottom >= next_top - 5) or
-                            (next_left > right and next_top > top)
-                        )
-                    )
+                    horizontal_overlap = max(0.0, min(right, next_right) - max(left, next_left))
+                    vertical_gap = bottom - next_top
+                    close_in_order = (previous.bbox is not None and block.bbox is not None
+                                      and next_page == first_page
+                                      and horizontal_overlap >= 0.6 * min(right - left, next_right - next_left)
+                                      and -5 <= vertical_gap <= 45)
                 if incomplete and continuation and close_in_order:
                     separator = "" if previous.text.endswith("-") else " "
                     if not separator:
@@ -422,6 +422,16 @@ def _merge_continuations(sections: list[Section], geometry: dict[str, tuple[int,
                             previous.content[-1].text = previous.content[-1].text.rstrip("-")
                     previous.text += separator + block.text
                     previous.content.extend(([InlineNode(type="text", text=separator)] if separator else []) + block.content)
+                    union = (min(left, next_left), min(bottom, next_bottom),
+                             max(right, next_right), max(top, next_top))
+                    geometry[previous.id] = (first_page, union)
+                    if previous.bbox and block.bbox:
+                        previous.bbox = {
+                            "x": min(previous.bbox["x"], block.bbox["x"]),
+                            "y": min(previous.bbox["y"], block.bbox["y"]),
+                            "width": union[2] - union[0],
+                            "height": union[3] - union[1],
+                        }
                     continue
             merged.append(block)
         section.blocks = merged

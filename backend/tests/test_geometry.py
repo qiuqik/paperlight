@@ -9,10 +9,41 @@ from types import ModuleType
 from unittest.mock import patch
 
 from backend.app.model import Block, Section
-from backend.app.normalizer import _block_bbox, _formula_number, _heading_key, _place_figures_before_intro, _repair_heading, _reposition_figures, extract_pdf_references, normalize_docling
+from backend.app.normalizer import _block_bbox, _formula_number, _heading_key, _merge_continuations, _place_figures_before_intro, _repair_heading, _reposition_figures, extract_pdf_references, normalize_docling
 
 
 class GeometryTests(unittest.TestCase):
+    def test_continuation_merges_nearby_same_column_fragments_and_unions_bbox(self) -> None:
+        first = Block(id="first", type="paragraph", text="A paragraph continues", page=2,
+                      bbox={"x": 50, "y": 100, "width": 200, "height": 30})
+        second = Block(id="second", type="paragraph", text="on the next line.", page=2,
+                       bbox={"x": 52, "y": 140, "width": 190, "height": 20})
+        section = Section(id="body", title="Body", blocks=[first, second])
+        geometry = {"first": (2, (50, 670, 250, 700)), "second": (2, (52, 640, 242, 660))}
+
+        _merge_continuations([section], geometry)
+
+        self.assertEqual([block.id for block in section.blocks], ["first"])
+        self.assertEqual(first.text, "A paragraph continues on the next line.")
+        self.assertEqual(first.bbox, {"x": 50, "y": 100, "width": 200, "height": 60})
+        self.assertEqual(geometry["first"], (2, (50, 640, 250, 700)))
+
+    def test_continuation_keeps_cross_page_and_cross_column_geometry_separate(self) -> None:
+        cases = [
+            (3, (50, 670, 250, 700)),
+            (2, (300, 640, 500, 660)),
+        ]
+        for page, second_box in cases:
+            with self.subTest(page=page, second_box=second_box):
+                first = Block(id="first", type="paragraph", text="A paragraph continues", page=2)
+                second = Block(id="second", type="paragraph", text="on the next line.", page=page)
+                section = Section(id="body", title="Body", blocks=[first, second])
+                geometry = {"first": (2, (50, 670, 250, 700)), "second": (page, second_box)}
+
+                _merge_continuations([section], geometry)
+
+                self.assertEqual([block.id for block in section.blocks], ["first", "second"])
+
     def test_joined_section_number_matches_normal_heading(self) -> None:
         self.assertEqual(_repair_heading("1Introduction"), "1 Introduction")
         self.assertEqual(_repair_heading("2RELATED WORK"), "2 RELATED WORK")
