@@ -61,6 +61,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const [openNoteEditors, setOpenNoteEditors] = useState<Set<string>>(() => new Set());
   const [progress, setProgress] = useState(0);
   const [colorOpen, setColorOpen] = useState(false);
+  const colorControlRef = useRef<HTMLDivElement>(null);
   const articleRef = useRef<HTMLElement>(null);
   const readingAnchorRef = useRef<{blockId: string; blockOffset: number} | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -77,6 +78,21 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const tablesInOrder = [...paper.tables].sort((first, second) => (first.order ?? Infinity) - (second.order ?? Infinity));
 
   useEffect(() => {void usePreferences.persist.rehydrate();}, []);
+  useEffect(() => {
+    if (!colorOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!colorControlRef.current?.contains(event.target as Node)) setColorOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setColorOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOutside, true);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOutside, true);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [colorOpen]);
   useEffect(() => {
     let cancelled = false;
     void restoreLocalFolder().then(async info => {
@@ -488,7 +504,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const toolbar = <div className="annotation-tools" role="toolbar" aria-label="标注工具">
     <div className="tool-group" role="group" aria-label="划线样式">{MARK_STYLES.map(({id, label, Icon}) => <button key={id} type="button" className={annotationUI.markStyle === id ? 'active' : ''} aria-label={label} title={label} aria-pressed={annotationUI.markStyle === id} onClick={() => annotationUI.setStyle(id)}><Icon size={18} /></button>)}</div>
     <div className="tool-group" role="group" aria-label="笔记"><button type="button" className={annotationUI.noteEnabled ? 'active' : ''} aria-label="添加笔记" title="选择后添加笔记" aria-pressed={annotationUI.noteEnabled} onClick={() => annotationUI.setNoteEnabled(!annotationUI.noteEnabled)}><StickyNote size={18} /></button></div>
-    <div className="tool-group color-control" role="group" aria-label="颜色"><button type="button" className="gradient-trigger" aria-label="选择标注颜色" title="标注颜色" aria-expanded={colorOpen} onClick={() => setColorOpen(!colorOpen)}><span className="gradient-swatch" /><span className="selected-color" style={{background: prefs.activeColor}} /></button>{colorOpen && <div className="color-popover"><label className="gradient-picker" aria-label="自定义颜色"><input type="color" aria-label="自定义颜色" value={prefs.activeColor} onChange={event => prefs.set({activeColor: event.target.value})} /><span>自定义颜色</span></label><div className="color-presets">{COLORS.map(color => <button key={color} type="button" title={color} aria-label={`颜色 ${color}`} style={{background: color}} onClick={() => {prefs.set({activeColor: color}); setColorOpen(false);}} />)}</div></div>}</div>
+    <div ref={colorControlRef} className="tool-group color-control" role="group" aria-label="颜色"><button type="button" className="gradient-trigger" aria-label="选择标注颜色" title="标注颜色" aria-expanded={colorOpen} onClick={() => setColorOpen(!colorOpen)}><span className="gradient-swatch" /><span className="selected-color" style={{background: prefs.activeColor}} /></button>{colorOpen && <div className="color-popover"><div className="color-presets">{COLORS.map(color => <button key={color} type="button" title={color} aria-label={`颜色 ${color}`} style={{background: color}} onClick={() => {prefs.set({activeColor: color}); setColorOpen(false);}} />)}<label className="gradient-picker" title="自定义颜色"><input type="color" aria-label="自定义颜色" value={prefs.activeColor} onChange={event => prefs.set({activeColor: event.target.value})} /></label></div></div>}</div>
   </div>;
 
   return <div className={`reader-app theme-${prefs.theme} dock-${prefs.toolbarDock} ${layout.focus ? 'focus-mode' : ''} ${annotationUI.markStyle === 'area' ? 'area-mode' : ''}`} style={{'--reader-font': prefs.fontFamily, '--reader-size': `${prefs.fontSize}px`, '--reader-leading': prefs.lineHeight, '--reader-width': `${prefs.contentWidth}px`, '--custom-app': prefs.customApp, '--custom-paper': prefs.customPaper, '--custom-text': prefs.customText, '--custom-accent': prefs.customAccent} as React.CSSProperties}>
