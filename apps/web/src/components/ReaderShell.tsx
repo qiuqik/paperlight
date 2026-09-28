@@ -53,6 +53,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const [serverHistory, setServerHistory] = useState<ServerRecord[]>([]);
   const [serverLibrary, setServerLibrary] = useState<LibraryRecord[]>([]);
   const [noteFocusId, setNoteFocusId] = useState<string | null>(null);
+  const [targetReferenceId, setTargetReferenceId] = useState<string | null>(null);
   const [openNoteEditors, setOpenNoteEditors] = useState<Set<string>>(() => new Set());
   const [progress, setProgress] = useState(0);
   const [colorOpen, setColorOpen] = useState(false);
@@ -68,6 +69,14 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const annotationUI = useAnnotationUI();
 
   useEffect(() => {void usePreferences.persist.rehydrate();}, []);
+  useEffect(() => {
+    if (!targetReferenceId || !layout.rightOpen || layout.rightPanel !== 'references') return;
+    const frame = requestAnimationFrame(() => {
+      document.getElementById(`ref-${targetReferenceId}`)?.scrollIntoView({behavior: 'smooth', block: 'center'});
+      setTargetReferenceId(null);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [targetReferenceId, layout.rightOpen, layout.rightPanel]);
   useEffect(() => {
     if (initialId) return;
     void listAnnotations(SAMPLE.id).then(setAnnotations).catch(() => {});
@@ -386,6 +395,13 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     } else root.querySelector(`[data-block-id="${record.anchor.blockId}"]`)?.scrollIntoView({behavior: 'smooth', block: 'center'});
   };
 
+  const openReference = (id: string) => {
+    const reference = paper.references.find(item => item.id === id || String(item.number) === id);
+    if (!reference) return;
+    layout.set({rightPanel: 'references', rightOpen: true});
+    setTargetReferenceId(reference.id);
+  };
+
   const toolbar = <div className="annotation-tools" role="toolbar" aria-label="标注工具">
     {TOOLS.map(({id, label, Icon}) => <button key={id} type="button" className={annotationUI.activeTool === id ? 'active' : ''} aria-label={label} title={label} aria-pressed={annotationUI.activeTool === id} onClick={() => annotationUI.setTool(annotationUI.activeTool === id ? 'none' : id)}><Icon size={18} /></button>)}
     <div className="color-control"><button type="button" aria-label="选择标注颜色" title="标注颜色" onClick={() => setColorOpen(!colorOpen)}><span className="color-dot" style={{background: prefs.activeColor}} /><Palette size={14} /></button>{colorOpen && <div className="color-popover">{COLORS.map(color => <button key={color} type="button" title={color} aria-label={`颜色 ${color}`} style={{background: color}} onClick={() => {prefs.set({activeColor: color}); setColorOpen(false);}} />)}<input type="color" aria-label="自定义颜色" value={prefs.activeColor} onChange={event => prefs.set({activeColor: event.target.value})} /></div>}</div>
@@ -396,7 +412,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     {importStatus && <div className="status-banner" role="status">{importStatus}<button aria-label="关闭提示" onClick={() => setImportStatus('')}><X size={14} /></button></div>}
     <div className="reader-grid"><aside className={`left-panel ${layout.leftOpen ? 'open' : ''}`}><div className="panel-heading"><span>目录</span><button title="收起目录" onClick={() => layout.set({leftOpen: false})}><ChevronLeft size={16} /></button></div><nav>{paper.sections.map(section => <button key={section.id} className={`toc-item level-${section.level}`} onClick={() => document.getElementById(section.id)?.scrollIntoView({behavior: 'smooth'})}>{section.title}</button>)}</nav></aside>
       {(!layout.leftOpen || layout.focus) && <div className="side-rail"><button title="目录" aria-label="目录" aria-pressed={layout.leftOpen} onClick={() => layout.set({leftOpen: !layout.leftOpen})}><List size={19} /></button></div>}
-      <main className="reading-column">{prefs.toolbarDock !== 'top' && <div className={`docked-tools docked-${prefs.toolbarDock}`}>{toolbar}</div>}<article ref={articleRef} className="reader-scroll" onMouseUp={onTextSelection} onPointerDown={onAreaStart} onPointerUp={onAreaEnd}><div className="paper-content"><DocumentRenderer document={paper} annotations={annotations} /></div></article><div className="reading-progress"><span style={{width: `${progress}%`}} /></div></main>
+      <main className="reading-column">{prefs.toolbarDock !== 'top' && <div className={`docked-tools docked-${prefs.toolbarDock}`}>{toolbar}</div>}<article ref={articleRef} className="reader-scroll" onMouseUp={onTextSelection} onPointerDown={onAreaStart} onPointerUp={onAreaEnd}><div className="paper-content"><DocumentRenderer document={paper} annotations={annotations} onReference={openReference} /></div></article><div className="reading-progress"><span style={{width: `${progress}%`}} /></div></main>
       {(!layout.rightOpen || layout.focus) && <div className="side-rail right-side">{PANELS.map(panel => {const Icon = panel.id === 'references' ? BookOpen : panel.id === 'figures' ? Image : panel.id === 'tables' ? Table2 : StickyNote; return <button key={panel.id} title={panel.label} aria-label={panel.label} aria-pressed={layout.rightOpen && layout.rightPanel === panel.id} onClick={() => layout.set({rightOpen: !(layout.rightOpen && layout.rightPanel === panel.id), rightPanel: panel.id})}><Icon size={18} /></button>;})}</div>}
       <aside className={`right-panel ${layout.rightOpen ? 'open' : ''}`}><div className="panel-heading"><span>{PANELS.find(item => item.id === layout.rightPanel)?.label}</span><button title="收起面板" onClick={() => layout.set({rightOpen: false})}><ChevronRight size={16} /></button></div><div className="panel-tabs">{PANELS.map(panel => <button key={panel.id} className={layout.rightPanel === panel.id ? 'active' : ''} onClick={() => layout.set({rightPanel: panel.id})}>{panel.label}</button>)}</div><div className="panel-list">
         {layout.rightPanel === 'references' && (paper.references.length ? paper.references.map(ref => <div className="reference-card" id={`ref-${ref.id}`} key={ref.id}><small>[{ref.number}] {ref.authors}</small><strong>{ref.title}</strong><span>{ref.venue} {ref.year}</span>{ref.preview && <p>{ref.preview}</p>}</div>) : <p className="empty-panel">暂无参考文献</p>)}
