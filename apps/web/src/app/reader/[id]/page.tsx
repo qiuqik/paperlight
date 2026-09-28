@@ -1,6 +1,6 @@
-import ReaderShell from '@/components/ReaderShell';
+import AppShell from '@/components/AppShell';
 
 export default async function DocumentPage({params}: {params: Promise<{id: string}>}) {
   const {id} = await params;
-  return <ReaderShell initialId={id} />;
+  return <AppShell initialId={id} />;
 }

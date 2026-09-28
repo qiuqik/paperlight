@@ -1,0 +1,56 @@
+'use client';
+
+import {useEffect, useState} from 'react';
+import ReaderShell from './ReaderShell';
+import Administration from './Administration';
+
+export type Account = {id: string; username: string; display_name: string; role: 'admin' | 'user'};
+
+export default function AppShell({initialId, administration = false}: {initialId?: string; administration?: boolean}) {
+  const [user, setUser] = useState<Account | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    void fetch('/api/parser/api/auth/me', {cache: 'no-store'}).then(async response => {
+      if (active && response.ok) setUser(await response.json() as Account);
+    }).catch(() => {if (active) setError('连接服务器失败');})
+      .finally(() => {if (active) setLoading(false);});
+    return () => {active = false;};
+  }, []);
+
+  const login = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setError('');
+    try {
+      const response = await fetch('/api/parser/api/auth/login', {method: 'POST', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({username, password})});
+      if (!response.ok) throw new Error(response.status === 401 ? '用户名或密码错误' : `登录失败 (${response.status})`);
+      setPassword('');
+      setUser(await response.json() as Account);
+    } catch (cause) {setError(cause instanceof Error ? cause.message : '登录失败');}
+  };
+
+  const logout = async () => {
+    await fetch('/api/parser/api/auth/logout', {method: 'POST'});
+    setUser(null);
+    setPassword('');
+    history.replaceState({}, '', '/');
+  };
+
+  if (loading) return <main className="auth-page"><p>正在连接 Paperlight…</p></main>;
+  if (!user) return <main className="auth-page"><form className="auth-card" onSubmit={event => void login(event)}>
+    <h1>Paperlight</h1><p>登录后继续阅读你的论文与笔记</p>
+    <label>用户名<input autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} required /></label>
+    <label>密码<input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} required /></label>
+    {error && <span className="auth-error" role="alert">{error}</span>}
+    <button type="submit">登录</button>
+  </form></main>;
+  if (administration) return user.role === 'admin'
+    ? <Administration user={user} onLogout={logout} />
+    : <main className="auth-page"><p>只有管理员可以访问此页面。</p><a href="/">返回阅读器</a></main>;
+  return <ReaderShell initialId={initialId} user={user} onLogout={logout} />;
+}

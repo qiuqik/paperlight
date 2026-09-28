@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from backend.app import main
+from backend.app.accounts import AccountStore
 
 
 class AnnotationApiTests(unittest.TestCase):
@@ -18,17 +19,26 @@ class AnnotationApiTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.old_data_dir = main.DATA_DIR
         self.old_library_dir = main.LIBRARY_DIR
-        main.DATA_DIR = Path(self.temp.name)
+        self.old_accounts = main.ACCOUNTS
+        main.DATA_DIR = Path(self.temp.name) / "documents"
+        main.DATA_DIR.mkdir()
         main.LIBRARY_DIR = Path(self.temp.name) / "library"
+        main.ACCOUNTS = AccountStore(Path(self.temp.name) / "paperlight.db")
+        main.ACCOUNTS.initialize()
+        self.admin = main.ACCOUNTS.create_user("admin", "test-password-123", "admin")
         folder = main.DATA_DIR / self.document_id
         folder.mkdir()
         (folder / "status.json").write_text('{"status":"ready"}', encoding="utf-8")
         (folder / "document.json").write_text(json.dumps({"sections": [{"blocks": [{"id": "p1", "text": "first block"}, {"id": "p2", "text": "second block"}, {"id": "figure-1", "type": "figure", "page": 2}]}]}), encoding="utf-8")
+        main.ACCOUNTS.add_document(self.document_id, self.admin["id"], "", "paper.pdf", f"documents/{self.document_id}", "ready")
         self.client = TestClient(main.app)
+        self.assertEqual(self.client.post("/api/auth/login", json={"username": "admin", "password": "test-password-123"}).status_code, 200)
 
     def tearDown(self) -> None:
         main.DATA_DIR = self.old_data_dir
         main.LIBRARY_DIR = self.old_library_dir
+        main.ACCOUNTS = self.old_accounts
+        main.jobs.clear()
         self.temp.cleanup()
 
     def test_cross_block_note_round_trip(self) -> None:
@@ -80,7 +90,7 @@ class AnnotationApiTests(unittest.TestCase):
         old = {"blockId": "p1", "quote": "first", "start": 0, "end": 5, "mode": "highlight", "color": "#f8d86a"}
         self.assertEqual(self.client.post(f"/api/documents/{self.document_id}/annotations", json=old).status_code, 201)
 
-    def test_document_api_exposes_model_job_and_preserves_server_record(self) -> None:
+    def test_document_api_exposes_model_job_and_deletes_owned_record(self) -> None:
         folder = main.DATA_DIR / self.document_id
         (folder / "status.json").write_text(json.dumps({"documentId": self.document_id, "status": "ready", "stage": "ready"}), encoding="utf-8")
         (folder / "document.json").write_text(json.dumps({"id": self.document_id, "metadata": {"title": "Test paper"}, "sections": []}), encoding="utf-8")
@@ -95,9 +105,9 @@ class AnnotationApiTests(unittest.TestCase):
             self.assertEqual(model.status_code, 200)
             self.assertEqual(model.json()["metadata"]["title"], "Test paper")
             self.assertEqual(model.json()["modelVersion"], 1)
-            self.assertEqual(self.client.delete(f"/api/documents/{self.document_id}").status_code, 405)
-            self.assertEqual(self.client.get(f"/api/documents/{self.document_id}").status_code, 200)
-            self.assertTrue(result_folder.exists())
+            self.assertEqual(self.client.delete(f"/api/documents/{self.document_id}").status_code, 204)
+            self.assertEqual(self.client.get(f"/api/documents/{self.document_id}").status_code, 404)
+            self.assertFalse(result_folder.exists())
         finally:
             main.RESULT_DIR = old_result_dir
 
@@ -105,7 +115,8 @@ class AnnotationApiTests(unittest.TestCase):
         folder = main.DATA_DIR / self.document_id
         (folder / "status.json").write_text(json.dumps({"documentId": self.document_id, "status": "processing"}), encoding="utf-8")
         self.assertEqual(self.client.get(f"/api/documents/{self.document_id}/model").status_code, 409)
-        self.assertEqual(self.client.delete(f"/api/documents/{self.document_id}").status_code, 405)
+        main.ACCOUNTS.update_document(self.document_id, status="processing")
+        self.assertEqual(self.client.delete(f"/api/documents/{self.document_id}").status_code, 409)
         self.assertTrue(folder.is_dir())
 
     def test_annotation_id_routes_update_and_delete(self) -> None:

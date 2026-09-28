@@ -97,6 +97,8 @@ class DocumentModel(BaseModel):
 
 class ProcessingStatus(BaseModel):
     documentId: str
+    ownerId: str | None = None
+    ownerUsername: str | None = None
     status: Literal["processing", "ready", "failed"]
     stage: str = "queued"
     progress: float = 0

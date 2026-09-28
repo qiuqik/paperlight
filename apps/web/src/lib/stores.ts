@@ -1,6 +1,5 @@
 'use client';
 import {create} from 'zustand';
-import {createJSONStorage, persist} from 'zustand/middleware';
 
 export type MarkStyle = 'highlight' | 'underline' | 'area';
 export type Dock = 'top' | 'bottom' | 'left' | 'right';
@@ -10,12 +9,17 @@ type Preferences = {
   fontFamily: string; fontSize: number; lineHeight: number; contentWidth: number; theme: Theme; toolbarDock: Dock; activeColor: string;
   customApp: string; customPaper: string; customText: string; customAccent: string;
   set: (values: Partial<Omit<Preferences, 'set'>>) => void;
+  reset: () => void;
 };
-export const usePreferences = create<Preferences>()(persist(set => ({
+const defaults = {
   fontFamily: 'Georgia, serif', fontSize: 18, lineHeight: 1.72, contentWidth: 800, theme: 'paper', toolbarDock: 'top', activeColor: '#f8d86a',
   customApp: '#e9f0eb', customPaper: '#ffffff', customText: '#26352f', customAccent: '#366f5e',
+} as const;
+export const usePreferences = create<Preferences>(set => ({
+  ...defaults,
   set: values => set(values),
-}), {name: 'paperlight-v2-preferences', storage: createJSONStorage(() => localStorage), skipHydration: true}));
+  reset: () => set(defaults),
+}));
 
 type Layout = {focus: boolean; leftOpen: boolean; rightOpen: boolean; rightPanel: RightPanel; settingsOpen: boolean; historyOpen: boolean; set: (values: Partial<Omit<Layout, 'set'>>) => void};
 export const useLayout = create<Layout>(set => ({

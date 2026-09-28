@@ -9,6 +9,7 @@ userdata/
 papers/
 架构规划说明.txt
 .env
+.paperlight-admin-credentials
 *.log
 node_modules/
 .npm-cache/

@@ -2,13 +2,11 @@
 import {useCallback, useEffect, useLayoutEffect, useRef, useState} from 'react';
 import {BookOpen, ChevronLeft, ChevronRight, Clock3, FilePlus2, Highlighter, Image, List, Maximize2, Scan, Settings2, StickyNote, Table2, Underline, X} from 'lucide-react';
 import DocumentRenderer from './DocumentRenderer';
+import type {Account} from './AppShell';
 import demo from '@/data/demo.json';
 import type {Annotation, AreaAnchor, DocumentModel} from '@/lib/document';
-import {allBlocks, DOCUMENT_MODEL_VERSION, isTextAnchor, resolveAssetSources} from '@/lib/document';
+import {allBlocks, isTextAnchor, resolveAssetSources} from '@/lib/document';
 import {captureAnchor, renderTextHighlights, resolveAnchor} from '@/lib/anchors';
-import {refreshSavedDocument} from '@/lib/documentCache';
-import {authorizeLocalFolder, chooseLocalFolder, getFolderDocument, hasLocalFolder, listFolderEntries, openFolderPdf, removeFolderEntry, restoreLocalFolder, supportsLocalFolder, type FolderEntry} from '@/lib/localFolder';
-import {deleteAnnotation, fingerprint, getDocument, getProgress, listAnnotations, listDocuments, migrateBrowserDataToFolder, recordBrowserVisit, removeBrowserHistory, saveAnnotation, saveDocument, saveProgress, type SavedDocument} from '@/lib/storage';
 import {useAnnotationUI, useLayout, usePreferences, type MarkStyle, type RightPanel} from '@/lib/stores';
 
 const SAMPLE = resolveAssetSources(demo as DocumentModel);
@@ -19,18 +17,14 @@ const MARK_STYLES: Array<{id: MarkStyle; label: string; Icon: typeof Highlighter
   {id: 'area', label: '区域选择', Icon: Scan},
 ];
 
-type ParserState = {documentId: string; status: string; stage?: string; progress?: number; document?: DocumentModel; error?: string};
-type ServerRecord = {documentId: string; title: string; pageCount: number; status: string};
+type ParserState = {documentId: string; status: string; stage?: string; progress?: number; document?: DocumentModel; error?: string; ownerId?: string; ownerUsername?: string};
+type ServerRecord = {documentId: string; title: string; pageCount: number; status: string; createdAt: number; lastOpenedAt?: number};
 type LibraryRecord = {id: string; name: string; folder: string; size: number};
 const PARSE_STAGE_LABELS: Record<string, string> = {
   queued: '等待解析', loading_parser: '准备解析器', extracting_structure: '提取正文结构',
   recognizing_scanned_pages: '识别扫描页面', linking_references: '关联参考文献',
   normalizing_document: '整理图表与公式', ready: '解析完成', failed: '解析失败',
 };
-function annotationTime(item: Annotation): number {
-  const value = item.updatedAt || item.createdAt || 0;
-  return value < 1e11 ? value * 1000 : value;
-}
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function waitForDocument(state: ParserState, onProgress: (message: string) => void): Promise<ParserState & {document: DocumentModel}> {
   for (let tries = 0; tries < 360 && state.status === 'processing'; tries++) {
@@ -44,18 +38,16 @@ async function waitForDocument(state: ParserState, onProgress: (message: string)
   return state as ParserState & {document: DocumentModel};
 }
 
-export default function ReaderShell({initialId}: {initialId?: string}) {
+export default function ReaderShell({initialId, user, onLogout}: {initialId?: string; user: Account; onLogout: () => Promise<void>}) {
   const [paper, setPaper] = useState<DocumentModel>(SAMPLE);
   const [localId, setLocalId] = useState(SAMPLE.id);
   const [serverId, setServerId] = useState<string | undefined>();
+  const [viewingOwner, setViewingOwner] = useState('');
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [importStatus, setImportStatus] = useState('');
-  const [historySource, setHistorySource] = useState<'local' | 'server'>('local');
-  const [localHistory, setLocalHistory] = useState<FolderEntry[]>([]);
-  const [folderInfo, setFolderInfo] = useState<{name: string; authorized: boolean} | null>(null);
-  const [folderReady, setFolderReady] = useState(false);
   const [serverHistory, setServerHistory] = useState<ServerRecord[]>([]);
   const [serverLibrary, setServerLibrary] = useState<LibraryRecord[]>([]);
+  const [settingsReady, setSettingsReady] = useState(false);
   const [noteFocusId, setNoteFocusId] = useState<string | null>(null);
   const [targetReferenceId, setTargetReferenceId] = useState<string | null>(null);
   const [openNoteEditors, setOpenNoteEditors] = useState<Set<string>>(() => new Set());
@@ -68,7 +60,6 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const areaStart = useRef<{block: HTMLElement; surface: HTMLElement; x: number; y: number} | null>(null);
   const noteSyncTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const pendingCreates = useRef(new Map<string, Promise<void>>());
-  const localAnnotationWrites = useRef(new Map<string, Promise<void>>());
   const serverNoteWrites = useRef(new Map<string, Promise<void>>());
   const prefs = usePreferences();
   const layout = useLayout();
@@ -77,7 +68,26 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const figuresInOrder = [...paper.figures].sort((first, second) => (first.order ?? Infinity) - (second.order ?? Infinity));
   const tablesInOrder = [...paper.tables].sort((first, second) => (first.order ?? Infinity) - (second.order ?? Infinity));
 
-  useEffect(() => {void usePreferences.persist.rehydrate();}, []);
+  useEffect(() => {
+    let active = true;
+    usePreferences.getState().reset();
+    void fetch('/api/parser/api/settings', {cache: 'no-store'}).then(async response => {
+      if (response.ok && active) prefs.set(await response.json());
+    }).catch(() => {if (active) setImportStatus('阅读设置暂时无法同步');})
+      .finally(() => {if (active) setSettingsReady(true);});
+    return () => {active = false;};
+  }, [user.id]);
+  useEffect(() => {
+    if (!settingsReady) return;
+    const timer = setTimeout(() => {
+      const {fontFamily, fontSize, lineHeight, contentWidth, theme, toolbarDock, activeColor, customApp, customPaper, customText, customAccent} = usePreferences.getState();
+      void fetch('/api/parser/api/settings', {method: 'PUT', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({fontFamily, fontSize, lineHeight, contentWidth, theme, toolbarDock, activeColor, customApp, customPaper, customText, customAccent})})
+        .then(response => {if (!response.ok) setImportStatus('阅读设置未能同步到服务器');})
+        .catch(() => setImportStatus('阅读设置未能同步到服务器'));
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [settingsReady, prefs.fontFamily, prefs.fontSize, prefs.lineHeight, prefs.contentWidth, prefs.theme, prefs.toolbarDock, prefs.activeColor, prefs.customApp, prefs.customPaper, prefs.customText, prefs.customAccent]);
   useEffect(() => {
     if (!colorOpen) return;
     const closeOutside = (event: PointerEvent) => {
@@ -94,15 +104,6 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     };
   }, [colorOpen]);
   useEffect(() => {
-    let cancelled = false;
-    void restoreLocalFolder().then(async info => {
-      if (info?.authorized) await migrateBrowserDataToFolder();
-      if (!cancelled) setFolderInfo(info);
-    }).catch(() => {if (!cancelled) setImportStatus('本地文件夹无法读取，请在设置中重新授权');})
-      .finally(() => {if (!cancelled) setFolderReady(true);});
-    return () => {cancelled = true;};
-  }, []);
-  useEffect(() => {
     if (!targetReferenceId || !layout.rightOpen || layout.rightPanel !== 'references') return;
     const frame = requestAnimationFrame(() => {
       document.getElementById(`ref-${targetReferenceId}`)?.scrollIntoView({behavior: 'smooth', block: 'center'});
@@ -111,37 +112,41 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     return () => cancelAnimationFrame(frame);
   }, [targetReferenceId, layout.rightOpen, layout.rightPanel]);
   useEffect(() => {
-    if (initialId) return;
-    void listAnnotations(SAMPLE.id).then(setAnnotations).catch(() => {});
-  }, [initialId]);
-  useEffect(() => {
     if (!articleRef.current) return;
     return renderTextHighlights(articleRef.current, annotations);
   }, [paper, annotations]);
   useEffect(() => {
     const root = articleRef.current;
-    if (!root) return;
+    if (!root || !serverId) return;
     let cancelled = false;
     let restored = false;
     let frame = 0;
     let lastStored = '';
-    const legacyKey = `paperlight-progress-${localId}`;
+    let writeTimer: ReturnType<typeof setTimeout> | undefined;
+    let pending: {percent: number; blockId?: string; blockOffset: number} | undefined;
+    const flush = () => {
+      if (!pending) return;
+      const value = pending;
+      pending = undefined;
+      void fetch(`/api/parser/api/documents/${serverId}/progress`, {method: 'PUT', headers: {'content-type': 'application/json'}, body: JSON.stringify(value)})
+        .then(response => {if (!response.ok) setImportStatus('阅读进度未能同步到服务器');})
+        .catch(() => setImportStatus('阅读进度未能同步到服务器'));
+    };
     const restore = async () => {
       let saved: number | undefined;
       let savedBlockId: string | undefined;
       let savedBlockOffset = 0;
       try {
-        const entry = await getProgress(localId);
-        saved = entry?.percent;
-        savedBlockId = entry?.blockId;
-        savedBlockOffset = entry?.blockOffset || 0;
+        const response = await fetch(`/api/parser/api/documents/${serverId}/progress`, {cache: 'no-store'});
+        if (response.ok) {
+          const entry = await response.json() as {scroll_progress?: number; block_id?: string; block_offset?: number};
+          saved = entry.scroll_progress;
+          savedBlockId = entry.block_id;
+          savedBlockOffset = entry.block_offset || 0;
+        }
       } catch {}
-      if (saved === undefined) {
-        try {saved = Number(localStorage.getItem(legacyKey)) || 0;} catch {saved = 0;}
-        if (!cancelled) void saveProgress({id: localId, percent: saved, updatedAt: Date.now()}).catch(() => {});
-      }
       if (cancelled) return;
-      saved = Number.isFinite(saved) ? Math.max(0, Math.min(100, saved)) : 0;
+      saved = Number.isFinite(saved) ? Math.max(0, Math.min(100, saved!)) : 0;
       frame = requestAnimationFrame(() => {
         const block = savedBlockId && Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.dataset.blockId === savedBlockId);
         if (block) {
@@ -176,14 +181,14 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
       const marker = `${next}:${blockId || ''}:${Math.round(blockOffset * 20)}`;
       if (marker === lastStored) return;
       lastStored = marker;
-      void saveProgress({id: localId, percent: next, blockId, blockOffset, updatedAt: Date.now()}).catch(() => {
-        try {localStorage.setItem(legacyKey, String(next));} catch {}
-      });
+      pending = {percent: next, blockId, blockOffset};
+      if (writeTimer) clearTimeout(writeTimer);
+      writeTimer = setTimeout(flush, 400);
     };
     root.addEventListener('scroll', onScroll, {passive: true});
     void restore();
-    return () => {cancelled = true; cancelAnimationFrame(frame); root.removeEventListener('scroll', onScroll);};
-  }, [paper, localId]);
+    return () => {cancelled = true; cancelAnimationFrame(frame); if (writeTimer) clearTimeout(writeTimer); flush(); root.removeEventListener('scroll', onScroll);};
+  }, [paper, serverId]);
 
   useLayoutEffect(() => {
     const root = articleRef.current;
@@ -195,126 +200,51 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     root.scrollTop += bounds.top + bounds.height * anchor.blockOffset - root.getBoundingClientRect().top - 24;
   }, [prefs.fontFamily, prefs.fontSize, prefs.lineHeight, prefs.contentWidth, layout.focus, layout.leftOpen, layout.rightOpen]);
 
-  const openDocument = useCallback(async (document: DocumentModel, id: string, remote?: string) => {
-    const documentKey = document.fingerprint && /^[a-f0-9]{64}$/.test(document.fingerprint) ? document.fingerprint : id;
-    let saved: Annotation[] = [];
-    try {saved = await listAnnotations(documentKey);} catch {}
-    if (documentKey !== id) {
-      try {
-        const legacy = await listAnnotations(id);
-        const merged = new Map(saved.map(item => [item.id, item]));
-        for (const item of legacy) {
-          const current = merged.get(item.id);
-          if (!current || annotationTime(item) > annotationTime(current)) {
-            const moved = {...item, documentId: documentKey};
-            await saveAnnotation(moved);
-            merged.set(item.id, moved);
-          }
-        }
-        saved = [...merged.values()];
-        const [currentProgress, legacyProgress] = await Promise.all([getProgress(documentKey), getProgress(id)]);
-        if (legacyProgress && (!currentProgress || legacyProgress.updatedAt > currentProgress.updatedAt)) {
-          await saveProgress({...legacyProgress, id: documentKey});
-        }
-      } catch {}
-    }
+  const openDocument = useCallback(async (document: DocumentModel, id: string, ownerId?: string, ownerUsername?: string) => {
+    const response = await fetch(`/api/parser/api/documents/${id}/annotations`, {cache: 'no-store'});
+    if (!response.ok) throw new Error('无法读取此论文的笔记');
+    const saved = (await response.json() as Array<Annotation & {blockId?: string; start?: number; end?: number; quote?: string; mode?: string}>).map(item => {
+      if (item.anchor) return item;
+      const anchor = {start: {blockId: item.blockId || '', offset: item.start || 0}, end: {blockId: item.blockId || '', offset: item.end || 0}, quote: item.quote || '', prefix: '', suffix: ''};
+      return {...item, documentId: id, type: item.note ? 'note' : item.mode === 'underline' ? 'underline' : 'highlight', anchor} as Annotation;
+    });
     readingAnchorRef.current = null;
-    setProgress(0); setPaper(resolveAssetSources(document, remote)); setLocalId(documentKey); setServerId(remote);
-    if (remote) {
-      try {
-        const [response, deletionsResponse] = await Promise.all([
-          fetch(`/api/parser/api/documents/${remote}/annotations`),
-          fetch(`/api/parser/api/documents/${remote}/annotation-deletions`),
-        ]);
-        if (response.ok && deletionsResponse.ok) {
-          const deletedIds = new Set(await deletionsResponse.json() as string[]);
-          for (const item of saved) if (deletedIds.has(item.id)) await deleteAnnotation(item.id, documentKey);
-          saved = saved.filter(item => !deletedIds.has(item.id));
-          const remoteAnnotations = (await response.json() as Array<Annotation & {blockId?: string; start?: number; end?: number; quote?: string; mode?: string}>).map(item => {
-            if (item.anchor) return item;
-            const anchor = {start: {blockId: item.blockId || '', offset: item.start || 0}, end: {blockId: item.blockId || '', offset: item.end || 0}, quote: item.quote || '', prefix: '', suffix: ''};
-            return {...item, type: item.note ? 'note' : item.mode === 'underline' ? 'underline' : 'highlight', anchor} as Annotation;
-          });
-          const merged = new Map(saved.map(item => [item.id, item]));
-          const remoteIds = new Set(remoteAnnotations.map(item => item.id));
-          for (const item of remoteAnnotations) {
-            if (!item.anchor) continue;
-            const current = merged.get(item.id);
-            const preserveUnsyncedNote = !!current?.note && !item.note && !item.updatedAt;
-            if (current && (preserveUnsyncedNote || annotationTime(current) > annotationTime(item)) && current.note !== item.note) {
-              try {
-                const update = await fetch(`/api/parser/api/documents/${remote}/annotations/${item.id}`, {method: 'PATCH', headers: {'content-type': 'application/json'}, body: JSON.stringify({note: current.note || ''})});
-                if (!update.ok) setImportStatus('笔记未能同步到服务器');
-              } catch {setImportStatus('笔记未能同步到服务器');}
-            }
-            if (!current || (!preserveUnsyncedNote && annotationTime(item) > annotationTime(current))) {
-              const incoming = {...item, documentId: documentKey};
-              await saveAnnotation(incoming);
-              merged.set(item.id, incoming);
-            }
-          }
-          for (const item of saved) {
-            if (remoteIds.has(item.id) || !item.anchor) continue;
-            try {
-              const upload = await fetch(`/api/parser/api/documents/${remote}/annotations`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(item)});
-              if (!upload.ok) setImportStatus('批注未能同步到服务器');
-            } catch {setImportStatus('批注未能同步到服务器');}
-          }
-          saved = [...merged.values()];
-        }
-      } catch {}
-    }
+    setProgress(0); setPaper(resolveAssetSources(document, id)); setLocalId(id); setServerId(id);
+    setViewingOwner(ownerId && ownerId !== user.id ? ownerUsername || '其他用户' : '');
     setAnnotations(saved); setLayout({historyOpen: false});
-    void recordBrowserVisit(documentKey, document.metadata.title, remote).catch(() => {});
-    try {history.replaceState({}, '', id === SAMPLE.id ? '/' : `/reader/${encodeURIComponent(id)}`);} catch {}
-  }, [setLayout]);
-
-  const openSavedDocument = useCallback(async (entry: SavedDocument) => {
-    const refreshed = await refreshSavedDocument(entry);
-    if (refreshed !== entry) {
-      try {await saveDocument(refreshed);} catch {setImportStatus('文档已更新，但未能保存到本地文件夹');}
-    }
-    await openDocument(refreshed.document, refreshed.id, refreshed.serverId);
-  }, [openDocument]);
+    try {history.replaceState({}, '', `/reader/${encodeURIComponent(id)}`);} catch {}
+  }, [setLayout, user.id]);
 
   useEffect(() => {
-    if (!initialId || !folderReady) return;
+    if (!initialId) return;
     let cancelled = false;
     (async () => {
       try {
-        const saved = await getDocument(initialId);
-        if (saved && !cancelled) {await openSavedDocument(saved); return;}
         const response = await fetch(`/api/parser/api/documents/${encodeURIComponent(initialId)}`);
-        if (!response.ok) return;
+        if (!response.ok) throw new Error('无法访问这篇论文');
         const state = await response.json() as ParserState;
-        if (state.document && !cancelled) await openDocument(state.document, initialId, initialId);
-      } catch {}
+        if (state.document && !cancelled) await openDocument(state.document, initialId, state.ownerId, state.ownerUsername);
+      } catch (error) {if (!cancelled) setImportStatus(error instanceof Error ? error.message : '无法打开论文');}
     })();
     return () => {cancelled = true;};
-  }, [folderReady, initialId, openDocument, openSavedDocument]);
-
-  const queueLocalAnnotationWrite = useCallback((record: Annotation): Promise<void> => {
-    const writes = localAnnotationWrites.current;
-    const previous = writes.get(record.id);
-    const next = (previous?.catch(() => {}) ?? Promise.resolve()).then(async () => {await saveAnnotation(record);});
-    writes.set(record.id, next);
-    const clear = () => {if (writes.get(record.id) === next) writes.delete(record.id);};
-    void next.then(clear, clear);
-    return next;
-  }, []);
+  }, [initialId, openDocument]);
 
   const addAnnotation = useCallback(async (record: Annotation) => {
+    if (!serverId) return;
     setAnnotations(current => [...current, record]);
     if (record.type === 'note' || record.noteEnabled) {setLayout({rightPanel: 'notes', rightOpen: true}); setNoteFocusId(record.id);}
     const pending = (async () => {
-      try {await queueLocalAnnotationWrite(record);} catch {setImportStatus('批注未能保存到本地文件夹');}
-      if (serverId) {
-        try {const response = await fetch(`/api/parser/api/documents/${serverId}/annotations`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(record)}); if (!response.ok) setImportStatus('批注未能同步到服务器');} catch {setImportStatus('批注未能同步到服务器');}
+      try {
+        const response = await fetch(`/api/parser/api/documents/${serverId}/annotations`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(record)});
+        if (!response.ok) throw new Error(`保存批注失败 (${response.status})`);
+      } catch {
+        setAnnotations(current => current.filter(item => item.id !== record.id));
+        setImportStatus('批注未能保存到服务器，请重试');
       }
     })();
     pendingCreates.current.set(record.id, pending);
     try {await pending;} finally {pendingCreates.current.delete(record.id);}
-  }, [queueLocalAnnotationWrite, serverId, setLayout]);
+  }, [serverId, setLayout]);
 
   const syncNote = (annotationId: string, note: string, remote: string) => {
     const writes = serverNoteWrites.current;
@@ -331,7 +261,6 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   const updateNote = (record: Annotation, note: string) => {
     const changed = {...record, note, updatedAt: Date.now()};
     setAnnotations(current => current.map(item => item.id === record.id ? {...item, note, updatedAt: changed.updatedAt} : item));
-    void queueLocalAnnotationWrite(changed).catch(() => setImportStatus('笔记未能保存到本地文件夹'));
     const prior = noteSyncTimers.current.get(record.id);
     if (prior) clearTimeout(prior);
     if (serverId) noteSyncTimers.current.set(record.id, setTimeout(() => {
@@ -346,7 +275,6 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     try {
       await pendingCreates.current.get(record.id);
       await serverNoteWrites.current.get(record.id)?.catch(() => {});
-      await localAnnotationWrites.current.get(record.id)?.catch(() => {});
       if (serverId) {
         const response = await fetch(`/api/parser/api/documents/${serverId}/annotations/${record.id}`, {method: 'DELETE'});
         if (!response.ok && response.status !== 404) throw new Error(`Delete failed: ${response.status}`);
@@ -356,10 +284,9 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
       setImportStatus('删除未同步到服务器，请重试');
       return;
     }
-    try {await deleteAnnotation(record.id, record.documentId);} catch {setImportStatus('已从服务器删除，但未能清理本地文件夹的副本');}
   };
   const onTextSelection = () => {
-    if (annotationUI.markStyle === 'area' || !articleRef.current) return;
+    if (annotationUI.markStyle === 'area' || !articleRef.current || !serverId) return;
     const anchor = captureAnchor(articleRef.current);
     if (!anchor) return;
     const record: Annotation = {id: crypto.randomUUID(), documentId: localId, type: annotationUI.noteEnabled ? 'note' : annotationUI.markStyle, style: annotationUI.markStyle, noteEnabled: annotationUI.noteEnabled, color: prefs.activeColor, anchor, note: '', createdAt: Date.now()};
@@ -367,7 +294,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     window.getSelection()?.removeAllRanges();
   };
   const onAreaStart = (event: React.PointerEvent<HTMLElement>) => {
-    if (annotationUI.markStyle !== 'area') return;
+    if (annotationUI.markStyle !== 'area' || !serverId) return;
     const block = (event.target as Element).closest<HTMLElement>('.area-target[data-block-id]');
     if (!block) return;
     const imageSurface = block.querySelector<HTMLElement>('.area-surface');
@@ -400,78 +327,47 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
     void addAnnotation({id: crypto.randomUUID(), documentId: localId, type: 'area', noteEnabled: annotationUI.noteEnabled, color: prefs.activeColor, anchor, createdAt: Date.now()});
   };
 
-  const importPdf = async (file?: File, sourcePath?: string[]) => {
+  const importPdf = async (file?: File) => {
     if (!file) return;
-    setImportStatus('正在检查本地记录…');
     try {
-      const hash = await fingerprint(file);
-      const cached = await getDocument(hash);
-      if (cached?.document.modelVersion === DOCUMENT_MODEL_VERSION) {
-        if (hasLocalFolder() && sourcePath) await saveDocument({...cached, sourcePath});
-        setImportStatus(''); await openSavedDocument(cached); return;
-      }
       const body = new FormData(); body.set('file', file);
       setImportStatus('正在上传 PDF…');
       const response = await fetch('/api/parser/api/documents', {method: 'POST', body});
       if (!response.ok) throw new Error(`上传失败 (${response.status})`);
       const state = await waitForDocument(await response.json() as ParserState, setImportStatus);
-      await saveDocument({id: hash, document: state.document, filename: file.name, savedAt: Date.now(), pdf: hasLocalFolder() && !sourcePath ? file : undefined, sourcePath, serverId: state.documentId});
-      await openDocument(state.document, hash, state.documentId);
-      setImportStatus(hasLocalFolder() ? '' : '已保存在服务器；选择本地文件夹后可在此设备保存 PDF');
+      await openDocument(state.document, state.documentId, state.ownerId, state.ownerUsername);
+      setImportStatus('');
     } catch (error) {setImportStatus(error instanceof Error ? error.message : '导入失败');}
     if (fileRef.current) fileRef.current.value = '';
   };
 
-  const selectFolder = async () => {
+  const openHistory = async () => {
+    layout.set({historyOpen: true});
     try {
-      const name = await chooseLocalFolder();
-      setFolderInfo({name, authorized: true});
-      const migrated = await migrateBrowserDataToFolder();
-      setImportStatus(migrated ? `已将 ${migrated} 条旧记录移入本地文件夹` : '本地文件夹已连接');
-      if (layout.historyOpen) await openHistory('local');
-    } catch (error) {if (!(error instanceof DOMException && error.name === 'AbortError')) setImportStatus(error instanceof Error ? error.message : '无法连接本地文件夹');}
+      const response = await fetch('/api/parser/api/documents', {cache: 'no-store'});
+      if (!response.ok) throw new Error('无法读取我的论文');
+      setServerHistory(await response.json() as ServerRecord[]);
+      if (user.role === 'admin') {
+        const library = await fetch('/api/parser/api/library', {cache: 'no-store'});
+        setServerLibrary(library.ok ? await library.json() as LibraryRecord[] : []);
+      }
+    } catch (error) {setImportStatus(error instanceof Error ? error.message : '无法读取我的论文');}
   };
-  const reauthorizeFolder = async () => {
-    try {
-      if (!await authorizeLocalFolder()) throw new Error('未获得文件夹读写权限');
-      await migrateBrowserDataToFolder();
-      setFolderInfo(info => info ? {...info, authorized: true} : info);
-      if (layout.historyOpen) await openHistory('local');
-    } catch (error) {setImportStatus(error instanceof Error ? error.message : '本地文件夹授权失败');}
-  };
+  useEffect(() => {if (!initialId) void openHistory();}, [initialId, user.id]);
 
-  const openHistory = async (source: 'local' | 'server') => {
-    setHistorySource(source); layout.set({historyOpen: true});
-    if (source === 'local') {
-      try {
-        const [folder, legacy] = await Promise.all([hasLocalFolder() ? listFolderEntries() : Promise.resolve([]), listDocuments()]);
-        setLocalHistory([...folder, ...legacy.filter(item => !folder.some(saved => saved.id === item.id))].sort((a, b) => b.savedAt - a.savedAt));
-      } catch {setImportStatus('本地文件夹读取失败'); setLocalHistory([]);}
-    }
-    else {
-      const [documents, library] = await Promise.allSettled([fetch('/api/parser/api/documents'), fetch('/api/parser/api/library')]);
-      setServerHistory(documents.status === 'fulfilled' && documents.value.ok ? await documents.value.json() : []);
-      setServerLibrary(library.status === 'fulfilled' && library.value.ok ? await library.value.json() : []);
-    }
-  };
-  const openLocalEntry = async (entry: FolderEntry) => {
-    if ('document' in entry) await openSavedDocument(entry);
-    else await importPdf(await openFolderPdf(entry.sourcePath), entry.sourcePath);
-  };
-  const removeLocalEntry = async (entry: FolderEntry) => {
-    try {
-      const folderEntry = hasLocalFolder() ? 'document' in entry ? await getFolderDocument(entry.id) : entry : null;
-      if (folderEntry) await removeFolderEntry(folderEntry);
-      await removeBrowserHistory(entry.id);
-      setLocalHistory(current => current.filter(item => item.id !== entry.id));
-    } catch (error) {setImportStatus(error instanceof Error ? error.message : '移除本地记录失败');}
+  const deleteServerDocument = async (id: string) => {
+    if (!window.confirm('删除这篇论文及其笔记？此操作无法撤销。')) return;
+    const response = await fetch(`/api/parser/api/documents/${id}`, {method: 'DELETE'});
+    if (!response.ok) {setImportStatus('删除论文失败'); return;}
+    setServerHistory(current => current.filter(item => item.documentId !== id));
+    if (serverId === id) {setPaper(SAMPLE); setServerId(undefined); setLocalId(SAMPLE.id); setViewingOwner(''); setAnnotations([]); history.replaceState({}, '', '/');}
   };
   const openServer = async (id: string) => {
     const response = await fetch(`/api/parser/api/documents/${id}`);
     if (!response.ok) throw new Error('服务器文档无法打开');
     const state = await response.json() as ParserState;
     if (!state.document) throw new Error('文档尚未完成解析');
-    await openDocument(state.document, id, id);
+    await openDocument(state.document, id, state.ownerId, state.ownerUsername);
   };
   const openLibrary = async (id: string, filename: string) => {
     setImportStatus('正在打开服务器文件…');
@@ -479,9 +375,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
       const response = await fetch(`/api/parser/api/library/${id}/open`, {method: 'POST'});
       if (!response.ok) throw new Error(`服务器文件无法打开 (${response.status})`);
       const state = await waitForDocument(await response.json() as ParserState, setImportStatus);
-      const localKey = state.document.fingerprint || state.documentId;
-      await saveDocument({id: localKey, document: state.document, filename, savedAt: Date.now(), serverId: state.documentId});
-      await openDocument(state.document, localKey, state.documentId);
+      await openDocument(state.document, state.documentId, state.ownerId, state.ownerUsername);
       setImportStatus('');
     } catch (error) {setImportStatus(error instanceof Error ? error.message : '打开服务器文件失败');}
   };
@@ -508,7 +402,7 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
   </div>;
 
   return <div className={`reader-app theme-${prefs.theme} dock-${prefs.toolbarDock} ${layout.focus ? 'focus-mode' : ''} ${annotationUI.markStyle === 'area' ? 'area-mode' : ''}`} style={{'--reader-font': prefs.fontFamily, '--reader-size': `${prefs.fontSize}px`, '--reader-leading': prefs.lineHeight, '--reader-width': `${prefs.contentWidth}px`, '--custom-app': prefs.customApp, '--custom-paper': prefs.customPaper, '--custom-text': prefs.customText, '--custom-accent': prefs.customAccent} as React.CSSProperties}>
-    <header className="reader-topbar"><div className="brand"><BookOpen size={20} /><strong>Paperlight</strong></div><span className="top-title" title={paper.metadata.title}>{paper.metadata.title}</span>{prefs.toolbarDock === 'top' && toolbar}<div className="top-actions"><span className="read-time"><Clock3 size={15} /> {paper.metadata.readMinutes || '—'} min</span><button title="专注模式" aria-label="专注模式" aria-pressed={layout.focus} onClick={() => layout.set({focus: !layout.focus, leftOpen: layout.focus, rightOpen: layout.focus})}><Maximize2 size={18} /></button><button title="设置" aria-label="设置" onClick={() => layout.set({settingsOpen: true})}><Settings2 size={18} /></button><button title="历史记录" aria-label="历史记录" onClick={() => void openHistory('local')}><Clock3 size={18} /></button><button className="import-button" onClick={() => fileRef.current?.click()}><FilePlus2 size={16} /> 导入</button></div></header>
+    <header className="reader-topbar"><div className="brand"><BookOpen size={20} /><strong>Paperlight</strong></div><button className="library-link" onClick={() => void openHistory()}>我的论文</button>{viewingOwner && <span className="owner-context">正在查看 {viewingOwner} 的论文</span>}<span className="top-title" title={paper.metadata.title}>{paper.metadata.title}</span>{prefs.toolbarDock === 'top' && toolbar}<div className="top-actions"><span className="read-time"><Clock3 size={15} /> {paper.metadata.readMinutes || '—'} min</span><button title="专注模式" aria-label="专注模式" aria-pressed={layout.focus} onClick={() => layout.set({focus: !layout.focus, leftOpen: layout.focus, rightOpen: layout.focus})}><Maximize2 size={18} /></button><button title="设置" aria-label="设置" onClick={() => layout.set({settingsOpen: true})}><Settings2 size={18} /></button>{user.role === 'admin' && <a className="admin-link" href="/admin">管理</a>}<button title="退出登录" aria-label="退出登录" onClick={() => void onLogout()}>{user.display_name.slice(0, 2)} · 退出</button><button className="import-button" onClick={() => fileRef.current?.click()}><FilePlus2 size={16} /> 导入</button></div></header>
     {importStatus && <div className="status-banner" role="status">{importStatus}<button aria-label="关闭提示" onClick={() => setImportStatus('')}><X size={14} /></button></div>}
     <div className="reader-grid"><aside className={`left-panel ${layout.leftOpen ? 'open' : ''}`}><div className="panel-heading"><span>目录</span><button title="收起目录" onClick={() => layout.set({leftOpen: false})}><ChevronLeft size={16} /></button></div><nav>{paper.sections.map(section => <button key={section.id} className={`toc-item level-${section.level}`} onClick={() => document.getElementById(section.id)?.scrollIntoView({behavior: 'smooth'})}>{section.title}</button>)}</nav></aside>
       {(!layout.leftOpen || layout.focus) && <div className="side-rail"><button title="目录" aria-label="目录" aria-pressed={layout.leftOpen} onClick={() => layout.set({leftOpen: !layout.leftOpen})}><List size={19} /></button></div>}
@@ -520,13 +414,14 @@ export default function ReaderShell({initialId}: {initialId?: string}) {
         {layout.rightPanel === 'tables' && (tablesInOrder.length ? tablesInOrder.map(item => <button className="asset-card" key={item.id} onClick={() => document.getElementById(item.id)?.scrollIntoView({behavior: 'smooth', block: 'center'})}><strong>{item.label || `Table ${item.number}`}</strong><span>{item.caption}</span></button>) : <p className="empty-panel">暂无表格</p>)}
         {layout.rightPanel === 'notes' && (annotations.length ? annotations.map(item => <div className="note-card" key={item.id} style={{borderColor: item.color, background: `${item.color}18`}}><button className="note-quote" onClick={() => jumpToAnnotation(item)}>{isTextAnchor(item.anchor) ? `“${item.anchor.quote}”` : `第 ${item.anchor.page} 页区域`}</button>{(item.type === 'note' || item.noteEnabled || !!item.note || openNoteEditors.has(item.id)) && <textarea aria-label="笔记内容" placeholder="输入笔记…" value={item.note || ''} autoFocus={noteFocusId === item.id} onFocus={() => setNoteFocusId(null)} onChange={event => void updateNote(item, event.target.value)} onBlur={event => {const timer = noteSyncTimers.current.get(item.id); if (timer && serverId) {clearTimeout(timer); noteSyncTimers.current.delete(item.id); syncNote(item.id, event.currentTarget.value, serverId);}}} />}<div className="note-footer"><span>{item.type === 'note' ? item.style === 'underline' ? '下划线 · 笔记' : '高亮 · 笔记' : item.type === 'area' ? item.noteEnabled ? '区域 · 笔记' : '区域' : item.type === 'underline' ? '下划线' : '高亮'}</span>{item.type !== 'note' && !item.noteEnabled && !item.note && !openNoteEditors.has(item.id) && <button onClick={() => {setOpenNoteEditors(current => new Set(current).add(item.id)); setNoteFocusId(item.id);}}>添加笔记</button>}<button onClick={() => void removeAnnotation(item)}>删除</button></div></div>) : <p className="empty-panel">选择文字后，笔记和标注会出现在这里。</p>)}
       </div></aside></div>
-    {layout.settingsOpen && <div className="drawer-backdrop" onClick={() => layout.set({settingsOpen: false})}><aside className="settings-drawer" onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>阅读设置</h2><button aria-label="关闭设置" onClick={() => layout.set({settingsOpen: false})}><X size={20} /></button></div><label>字体<select value={prefs.fontFamily} onChange={event => prefs.set({fontFamily: event.target.value})}><option value="Georgia, serif">Georgia</option><option value="Arial, sans-serif">Arial</option><option value="'Times New Roman', serif">Times New Roman</option></select></label><label>字号 <b>{prefs.fontSize}px</b><input type="range" min="14" max="26" value={prefs.fontSize} onChange={event => prefs.set({fontSize: Number(event.target.value)})} /></label><label>行距 <b>{prefs.lineHeight.toFixed(1)}</b><input type="range" min="1.2" max="2.2" step="0.1" value={prefs.lineHeight} onChange={event => prefs.set({lineHeight: Number(event.target.value)})} /></label><label>阅读宽度 <b>{prefs.contentWidth}px</b><input type="range" min="600" max="1200" step="20" value={prefs.contentWidth} onChange={event => prefs.set({contentWidth: Number(event.target.value)})} /></label><label>主题<select value={prefs.theme} onChange={event => prefs.set({theme: event.target.value as typeof prefs.theme})}><option value="paper">纸张</option><option value="warm">暖色</option><option value="dark">深色</option><option value="custom">自定义</option></select></label>{prefs.theme === 'custom' && <div className="custom-theme-colors">{([['customApp', '界面背景'], ['customPaper', '纸张背景'], ['customText', '正文文字'], ['customAccent', '强调色']] as const).map(([key, label]) => <label key={key}>{label}<input type="color" value={prefs[key]} onChange={event => prefs.set({[key]: event.target.value})} /></label>)}</div>}<label>工具栏位置<select value={prefs.toolbarDock} onChange={event => prefs.set({toolbarDock: event.target.value as typeof prefs.toolbarDock})}><option value="top">顶部</option><option value="bottom">底部</option><option value="left">左侧</option><option value="right">右侧</option></select></label><div className="folder-setting"><strong>本地文件夹</strong><p>{folderInfo?.authorized ? `已连接：${folderInfo.name}` : folderInfo ? `${folderInfo.name} 需要重新授权` : '尚未选择文件夹'}</p><div className="folder-actions">{folderInfo && !folderInfo.authorized && <button onClick={() => void reauthorizeFolder()}>重新授权</button>}<button onClick={() => void selectFolder()} disabled={!supportsLocalFolder()}>选择文件夹</button></div><small>浏览器不能仅凭输入的路径读取文件；选择后会记住此文件夹，获得授权时自动读取。PDF 和文档数据保存在所选文件夹。</small></div></aside></div>}
-    {layout.historyOpen && <div className="dialog-backdrop" onClick={() => layout.set({historyOpen: false})}><section className="history-dialog" onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>历史记录</h2><button aria-label="关闭历史记录" onClick={() => layout.set({historyOpen: false})}><X size={20} /></button></div><div className="history-tabs"><button className={historySource === 'local' ? 'active' : ''} onClick={() => void openHistory('local')}>本地文件夹</button><button className={historySource === 'server' ? 'active' : ''} onClick={() => void openHistory('server')}>服务器</button></div>
-      {historySource === 'local' && <div className="folder-history-controls"><span>{folderInfo?.authorized ? `已连接：${folderInfo.name}` : folderInfo ? `${folderInfo.name} 需要重新授权` : '尚未选择本地文件夹'}</span>{folderInfo && !folderInfo.authorized && <button onClick={() => void reauthorizeFolder()}>重新授权</button>}<button onClick={() => void selectFolder()} disabled={!supportsLocalFolder()}>选择文件夹</button></div>}
-      <div className="history-list">{historySource === 'local' ? (localHistory.length ? localHistory.map(item => <div className="history-row" key={item.id}><button className="history-open" onClick={() => void openLocalEntry(item).catch(error => setImportStatus(error instanceof Error ? error.message : '打开本地文档失败'))}><strong>{'document' in item ? item.document.metadata.title : item.filename}</strong><small>{item.filename}{'document' in item ? ` · ${item.document.metadata.pageCount} 页` : ' · 尚未解析'}</small></button><button className="history-remove" aria-label={`移除 ${item.filename} 的本地记录`} onClick={() => void removeLocalEntry(item)}>移除</button></div>) : <p className="empty-panel">请选择本地文件夹；PDF 会从所选文件夹读取。</p>) : <>
-      <h3>已解析文档</h3>{serverHistory.length ? serverHistory.map(item => <button key={item.documentId} onClick={() => void openServer(item.documentId).catch(error => setImportStatus(error.message))}><strong>{item.title}</strong><small>{item.pageCount} 页 · {item.status}</small></button>) : <p className="empty-panel">暂无已解析文档。</p>}
-      <h3>服务器文件库</h3>{serverLibrary.length ? serverLibrary.map(item => <button key={item.id} onClick={() => void openLibrary(item.id, item.name)}><strong>{item.name}</strong><small>{item.folder === '.' ? '文件库根目录' : item.folder} · {(item.size / 1024 / 1024).toFixed(1)} MB</small></button>) : <p className="empty-panel">文件库为空，或解析服务未启动。</p>}
-    </>}</div></section></div>}
+    {layout.settingsOpen && <div className="drawer-backdrop" onClick={() => layout.set({settingsOpen: false})}><aside className="settings-drawer" onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>阅读设置</h2><button aria-label="关闭设置" onClick={() => layout.set({settingsOpen: false})}><X size={20} /></button></div><label>字体<select value={prefs.fontFamily} onChange={event => prefs.set({fontFamily: event.target.value})}><option value="Georgia, serif">Georgia</option><option value="Arial, sans-serif">Arial</option><option value="'Times New Roman', serif">Times New Roman</option></select></label><label>字号 <b>{prefs.fontSize}px</b><input type="range" min="14" max="26" value={prefs.fontSize} onChange={event => prefs.set({fontSize: Number(event.target.value)})} /></label><label>行距 <b>{prefs.lineHeight.toFixed(1)}</b><input type="range" min="1.2" max="2.2" step="0.1" value={prefs.lineHeight} onChange={event => prefs.set({lineHeight: Number(event.target.value)})} /></label><label>阅读宽度 <b>{prefs.contentWidth}px</b><input type="range" min="600" max="1200" step="20" value={prefs.contentWidth} onChange={event => prefs.set({contentWidth: Number(event.target.value)})} /></label><label>主题<select value={prefs.theme} onChange={event => prefs.set({theme: event.target.value as typeof prefs.theme})}><option value="paper">纸张</option><option value="warm">暖色</option><option value="dark">深色</option><option value="custom">自定义</option></select></label>{prefs.theme === 'custom' && <div className="custom-theme-colors">{([['customApp', '界面背景'], ['customPaper', '纸张背景'], ['customText', '正文文字'], ['customAccent', '强调色']] as const).map(([key, label]) => <label key={key}>{label}<input type="color" value={prefs[key]} onChange={event => prefs.set({[key]: event.target.value})} /></label>)}</div>}<label>工具栏位置<select value={prefs.toolbarDock} onChange={event => prefs.set({toolbarDock: event.target.value as typeof prefs.toolbarDock})}><option value="top">顶部</option><option value="bottom">底部</option><option value="left">左侧</option><option value="right">右侧</option></select></label><p className="settings-sync">设置会自动保存到你的账户，在其他设备登录后恢复。</p></aside></div>}
+    {layout.historyOpen && <div className="dialog-backdrop" onClick={() => layout.set({historyOpen: false})}><section className="history-dialog" onClick={event => event.stopPropagation()}>
+      <div className="drawer-title"><h2>我的论文</h2><button aria-label="关闭我的论文" onClick={() => layout.set({historyOpen: false})}><X size={20} /></button></div>
+      <div className="history-list"><h3>最近阅读</h3>
+        {serverHistory.filter(item => item.lastOpenedAt).sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0)).slice(0, 5).map(item => <button key={item.documentId} onClick={() => void openServer(item.documentId).catch(error => setImportStatus(error.message))}><strong>{item.title}</strong><small>{item.pageCount} 页</small></button>)}
+        <h3>全部论文</h3>{serverHistory.length ? serverHistory.map(item => <div className="history-row" key={item.documentId}><button className="history-open" onClick={() => void openServer(item.documentId).catch(error => setImportStatus(error.message))}><strong>{item.title}</strong><small>{item.pageCount} 页 · {item.status}</small></button><button className="history-remove" aria-label={`删除 ${item.title}`} onClick={() => void deleteServerDocument(item.documentId)}>删除</button></div>) : <p className="empty-panel">还没有论文，点击右上角导入 PDF。</p>}
+        {user.role === 'admin' && <><h3>服务器文件库</h3>{serverLibrary.map(item => <button key={item.id} onClick={() => void openLibrary(item.id, item.name)}><strong>{item.name}</strong><small>{item.folder === '.' ? '文件库根目录' : item.folder} · {(item.size / 1024 / 1024).toFixed(1)} MB</small></button>)}</>}
+      </div></section></div>}
     <input ref={fileRef} type="file" accept="application/pdf,.pdf" hidden onChange={event => void importPdf(event.target.files?.[0])} />
   </div>;
 }

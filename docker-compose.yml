@@ -7,6 +7,7 @@ services:
       - "${PAPERLIGHT_WEB_BIND:-127.0.0.1}:8040:8040"
     environment:
       PAPERLIGHT_PARSER_URL: http://parser:8000
+      PAPERLIGHT_PUBLIC_ORIGIN: ${PAPERLIGHT_PUBLIC_ORIGIN:-https://desktop-c0d40qs.tailc57931.ts.net}
     depends_on:
       - parser
     restart: unless-stopped
