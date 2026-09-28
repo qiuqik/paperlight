@@ -23,7 +23,7 @@ class AnnotationApiTests(unittest.TestCase):
         folder = main.DATA_DIR / self.document_id
         folder.mkdir()
         (folder / "status.json").write_text('{"status":"ready"}', encoding="utf-8")
-        (folder / "document.json").write_text(json.dumps({"sections": [{"blocks": [{"id": "p1", "text": "first block"}, {"id": "p2", "text": "second block"}, {"id": "figure-1", "type": "figure"}]}]}), encoding="utf-8")
+        (folder / "document.json").write_text(json.dumps({"sections": [{"blocks": [{"id": "p1", "text": "first block"}, {"id": "p2", "text": "second block"}, {"id": "figure-1", "type": "figure", "page": 2}]}]}), encoding="utf-8")
         self.client = TestClient(main.app)
 
     def tearDown(self) -> None:
@@ -54,6 +54,15 @@ class AnnotationApiTests(unittest.TestCase):
         self.assertEqual(self.client.post(f"/api/documents/{self.document_id}/annotations", json=area).status_code, 201)
         area["anchor"]["bbox"]["width"] = 1.5
         self.assertEqual(self.client.post(f"/api/documents/{self.document_id}/annotations", json=area).status_code, 422)
+
+    def test_area_anchor_must_match_the_document_page(self) -> None:
+        area = {"type": "area", "color": "#f8d86a", "anchor": {"blockId": "figure-1", "page": 3,
+                "space": "page", "surface": "image", "bbox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4}}}
+        self.assertEqual(self.client.post(f"/api/documents/{self.document_id}/annotations", json=area).status_code, 422)
+        area["anchor"]["page"] = 2
+        created = self.client.post(f"/api/documents/{self.document_id}/annotations", json=area)
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.json()["anchor"]["bbox"], area["anchor"]["bbox"])
 
     def test_legacy_highlight_still_works(self) -> None:
         old = {"blockId": "p1", "quote": "first", "start": 0, "end": 5, "mode": "highlight", "color": "#f8d86a"}

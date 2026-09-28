@@ -341,14 +341,20 @@ def _create_v2_annotation(folder: Path, document_id: str, annotation: dict[str, 
     if kind == "area":
         block_id = anchor.get("blockId")
         box = anchor.get("bbox")
-        if block_id not in blocks or not isinstance(box, dict) or not isinstance(anchor.get("page"), int):
+        page = anchor.get("page")
+        if block_id not in blocks or not isinstance(box, dict) or not isinstance(page, int) or page < 1:
             raise HTTPException(status_code=422, detail="Invalid area anchor.")
+        if blocks[block_id].get("page") is not None and blocks[block_id]["page"] != page:
+            raise HTTPException(status_code=422, detail="Area anchor page does not match its block.")
+        if anchor.get("space", "block") not in {"block", "page"} or anchor.get("surface") not in {None, "image"}:
+            raise HTTPException(status_code=422, detail="Invalid area coordinate space.")
         try:
             x, y, width, height = (float(box[name]) for name in ("x", "y", "width", "height"))
         except (KeyError, TypeError, ValueError):
             raise HTTPException(status_code=422, detail="Invalid area coordinates.") from None
         if not (0 <= x <= 1 and 0 <= y <= 1 and 0 < width <= 1 - x and 0 < height <= 1 - y):
             raise HTTPException(status_code=422, detail="Area coordinates are outside the block.")
+        anchor = {**anchor, "bbox": {"x": x, "y": y, "width": width, "height": height}}
     else:
         start, end = anchor.get("start"), anchor.get("end")
         if not isinstance(start, dict) or not isinstance(end, dict):
