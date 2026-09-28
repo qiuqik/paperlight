@@ -9,11 +9,56 @@ from types import ModuleType
 from unittest.mock import patch
 
 from backend.app.model import Block, Section
-from backend.app.normalizer import _block_bbox, _formula_number, _heading_key, _merge_continuations, _place_figures_before_intro, _repair_heading, _reposition_figures, extract_pdf_references, normalize_docling
+from backend.app.normalizer import _block_bbox, _formula_number, _heading_key, _merge_continuations, _merge_list_item, _place_figures_before_intro, _repair_heading, _reposition_figures, extract_pdf_references, normalize_docling
 from backend.scripts.reorder_wide_figures import repair as repair_wide_figures
+from backend.scripts.repair_list_geometry import repair as repair_list_geometry
 
 
 class GeometryTests(unittest.TestCase):
+    def test_list_item_merge_covers_all_items_on_one_page(self) -> None:
+        first = Block(id="list", type="list", items=["First"], page=2,
+                      bbox={"x": 50, "y": 100, "width": 220, "height": 30})
+        second = Block(id="next", type="list", items=["Second"], page=2,
+                       bbox={"x": 55, "y": 140, "width": 210, "height": 25})
+
+        self.assertTrue(_merge_list_item(first, second))
+
+        self.assertEqual(first.items, ["First", "Second"])
+        self.assertEqual(first.bbox, {"x": 50, "y": 100, "width": 220, "height": 65})
+
+    def test_list_item_merge_rejects_different_page_or_column(self) -> None:
+        first = Block(id="list", type="list", items=["First"], page=2,
+                      bbox={"x": 50, "y": 100, "width": 220, "height": 30})
+        for page, x in ((3, 50), (2, 310)):
+            with self.subTest(page=page, x=x):
+                second = Block(id="next", type="list", items=["Second"], page=page,
+                               bbox={"x": x, "y": 140, "width": 210, "height": 25})
+                self.assertFalse(_merge_list_item(first, second))
+                self.assertEqual(first.items, ["First"])
+
+    def test_saved_list_geometry_uses_only_unique_same_column_source_items(self) -> None:
+        first_text = "The first list item has enough text to match uniquely"
+        second_text = "The second list item also has enough unique text"
+        original = {"x": 50, "y": 100, "width": 220, "height": 30}
+        model = {"modelVersion": 3, "pages": [{"number": 2, "height": 800}],
+                 "sections": [{"blocks": [{"id": "list", "type": "list", "page": 2,
+                                           "items": [f"• {first_text}", f"• {second_text}"],
+                                           "bbox": dict(original)}]}]}
+        def item(text: str, left: float, right: float, bottom: float, top: float) -> dict:
+            return {"label": "list_item", "text": text, "prov": [{"page_no": 2, "bbox": {
+                "l": left, "r": right, "b": bottom, "t": top, "coord_origin": "BOTTOMLEFT"}}]}
+        snapshot = {"texts": [item(first_text, 50, 270, 670, 700),
+                              item(second_text, 55, 265, 635, 660)]}
+
+        self.assertEqual(repair_list_geometry(model, snapshot), [{"block": "list", "page": 2, "items": 2}])
+        self.assertEqual(model["sections"][0]["blocks"][0]["bbox"],
+                         {"x": 50, "y": 100, "width": 220, "height": 65})
+        model["sections"][0]["blocks"][0]["bbox"] = dict(original)
+        snapshot["texts"][1]["prov"][0]["bbox"].update(l=310, r=520)
+        self.assertEqual(repair_list_geometry(model, snapshot), [])
+        snapshot["texts"][1]["prov"][0]["bbox"].update(l=55, r=265)
+        snapshot["texts"].append(item(second_text, 55, 265, 635, 660))
+        self.assertEqual(repair_list_geometry(model, snapshot), [])
     def test_continuation_merges_nearby_same_column_fragments_and_unions_bbox(self) -> None:
         first = Block(id="first", type="paragraph", text="A paragraph continues", page=2,
                       bbox={"x": 50, "y": 100, "width": 200, "height": 30})

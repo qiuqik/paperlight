@@ -437,6 +437,27 @@ def _merge_continuations(sections: list[Section], geometry: dict[str, tuple[int,
         section.blocks = merged
 
 
+def _merge_list_item(previous: Block, following: Block) -> bool:
+    """Join neighboring list items only when one PDF box can cover both."""
+    if previous.type != "list" or following.type != "list" or previous.page != following.page:
+        return False
+    first, second = previous.bbox, following.bbox
+    if not first or not second:
+        return False
+    overlap = max(0.0, min(first["x"] + first["width"], second["x"] + second["width"])
+                  - max(first["x"], second["x"]))
+    gap = second["y"] - (first["y"] + first["height"])
+    if overlap < 0.6 * min(first["width"], second["width"]) or not (-5 <= gap <= 80):
+        return False
+    left = min(first["x"], second["x"])
+    top = min(first["y"], second["y"])
+    right = max(first["x"] + first["width"], second["x"] + second["width"])
+    bottom = max(first["y"] + first["height"], second["y"] + second["height"])
+    previous.items.extend(following.items)
+    previous.bbox = {"x": left, "y": top, "width": right - left, "height": bottom - top}
+    return True
+
+
 def _wide_figure_anchor(sections: list[Section], geometry: dict[str, tuple[int, tuple[float, float, float, float]]],
                         figure_box: tuple[int, float, float, float, float]) -> tuple[Section, Block] | None:
     """Find the first body paragraph below a figure spanning two text columns."""
@@ -1154,9 +1175,7 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
         if not current:
             current = Section(id="introduction", title="Introduction", level=1, type="body", blocks=[])
             sections.append(current)
-        if block.type == "list" and current.blocks and current.blocks[-1].type == "list":
-            current.blocks[-1].items.extend(block.items)
-        else:
+        if not (block.type == "list" and current.blocks and _merge_list_item(current.blocks[-1], block)):
             current.blocks.append(block)
 
     if pending_figures or pending_tables:
