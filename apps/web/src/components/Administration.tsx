@@ -37,7 +37,7 @@ export default function Administration({user, onLogout}: {user: Account; onLogou
     event.preventDefault(); setMessage('');
     const response = await fetch('/api/parser/api/admin/users', {method: 'POST', headers: {'content-type': 'application/json'},
       body: JSON.stringify({username: newUsername, password: newPassword, role: newRole})});
-    if (!response.ok) {setMessage(response.status === 409 ? '用户名已存在' : '创建用户失败：密码至少 12 位'); return;}
+    if (!response.ok) {setMessage(response.status === 409 ? '用户名已存在' : '创建用户失败：密码至少 4 位'); return;}
     setNewUsername(''); setNewPassword(''); setNewRole('user');
     await loadUsers(); setMessage('用户已创建');
   };
@@ -81,12 +81,12 @@ export default function Administration({user, onLogout}: {user: Account; onLogou
       <strong>{item.username}</strong><span>{item.role === 'admin' ? '管理员' : '用户'} · {item.document_count} 篇{item.disabled ? ' · 已停用' : ''}</span>
     </button>)}</div><form className="admin-create" onSubmit={event => void createUser(event)}><h2>创建用户</h2>
       <input aria-label="新用户名" placeholder="用户名" value={newUsername} onChange={event => setNewUsername(event.target.value)} required />
-      <input aria-label="初始密码" type="password" placeholder="初始密码（至少 12 位）" value={newPassword} onChange={event => setNewPassword(event.target.value)} required minLength={12} />
+      <input aria-label="初始密码" type="password" placeholder="初始密码（至少 4 位，可用纯数字）" value={newPassword} onChange={event => setNewPassword(event.target.value)} required minLength={4} />
       <select aria-label="角色" value={newRole} onChange={event => setNewRole(event.target.value as 'admin' | 'user')}><option value="user">普通用户</option><option value="admin">管理员</option></select>
       <button type="submit">创建</button></form></section>
     <section>{selected ? <><h2>{selected.username}</h2><div className="admin-edit"><label>用户名<input value={username} onChange={event => setUsername(event.target.value)} /></label>
       <label>显示名称<input value={displayName} onChange={event => setDisplayName(event.target.value)} /></label>
-      <label>重置密码<input type="password" value={password} onChange={event => setPassword(event.target.value)} placeholder="留空则不修改" /></label>
+      <label>重置密码<input type="password" value={password} minLength={4} onChange={event => setPassword(event.target.value)} placeholder="留空则不修改；至少 4 位" /></label>
       <button onClick={() => void saveUser()}>保存修改</button>{selected.id !== user.id && <><button onClick={() => void setDisabled(!selected.disabled)}>{selected.disabled ? '启用账户' : '停用账户'}</button><button className="danger" onClick={() => void deleteUser()}>删除账户及数据</button></>}</div>
       <h3>论文</h3><div className="admin-documents">{documents.length ? documents.map(item => <div className="admin-document-row" key={item.documentId}><a href={`/reader/${item.documentId}`}>{item.title}<small>{item.pageCount} 页 · {item.status}</small></a><button aria-label={`删除 ${item.title}`} onClick={() => void deleteDocument(item)}>删除</button></div>) : <p>暂无论文</p>}</div></> : <p>选择用户，查看账户与论文。</p>}</section></div>
     {message && <p className="admin-message" role="status">{message}</p>}

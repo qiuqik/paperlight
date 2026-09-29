@@ -112,6 +112,23 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(new_device.post("/api/auth/login", json={"username": "alice", "password": "new-password-123"}).status_code, 200)
         self.assertEqual(new_device.get("/api/documents").json()[0]["favorite"], True)
 
+    def test_four_digit_numeric_passwords_work_for_creation_reset_and_change(self) -> None:
+        short = self.admin_client.post("/api/admin/users", json={"username": "short", "password": "123"})
+        self.assertEqual(short.status_code, 422)
+        created = self.admin_client.post("/api/admin/users", json={"username": "pinuser", "password": "1234"})
+        self.assertEqual(created.status_code, 201)
+        user_id = created.json()["id"]
+        client = TestClient(main.app)
+        self.assertEqual(client.post("/api/auth/login", json={"username": "pinuser", "password": "1234"}).status_code, 200)
+        self.assertEqual(client.post("/api/profile/password", json={"currentPassword": "1234", "newPassword": "123"}).status_code, 422)
+        self.assertEqual(client.post("/api/profile/password", json={"currentPassword": "1234", "newPassword": "5678"}).status_code, 204)
+        self.assertEqual(client.get("/api/auth/me").status_code, 401)
+        self.assertEqual(client.post("/api/auth/login", json={"username": "pinuser", "password": "5678"}).status_code, 200)
+        self.assertEqual(self.admin_client.patch(f"/api/admin/users/{user_id}", json={"password": "999"}).status_code, 422)
+        self.assertEqual(self.admin_client.patch(f"/api/admin/users/{user_id}", json={"password": "0000"}).status_code, 200)
+        self.assertEqual(client.get("/api/auth/me").status_code, 401)
+        self.assertEqual(client.post("/api/auth/login", json={"username": "pinuser", "password": "0000"}).status_code, 200)
+
     def test_logout_and_owned_document_deletion(self) -> None:
         self.assertEqual(self.alice_client.post("/api/auth/logout").status_code, 204)
         self.assertEqual(self.alice_client.get("/api/documents").status_code, 401)

@@ -92,8 +92,8 @@ class AccountStore:
         username = username.strip()
         if not (3 <= len(username) <= 40) or not all(char.isalnum() or char in "._-" for char in username):
             raise ValueError("Username must be 3–40 letters, digits, dots, underscores, or hyphens.")
-        if len(password) < 12 or len(password) > 1024:
-            raise ValueError("Password must be 12–1024 characters.")
+        if len(password) < 4 or len(password) > 1024:
+            raise ValueError("Password must be 4–1024 characters.")
         if role not in {"admin", "user"}:
             raise ValueError("Invalid role.")
         identifier = uuid.uuid4().hex
@@ -130,8 +130,8 @@ class AccountStore:
             return self.get_user(row["id"])
 
     def change_password(self, user_id: str, current_password: str, new_password: str) -> bool:
-        if not 12 <= len(new_password) <= 1024:
-            raise ValueError("Password must be 12–1024 characters.")
+        if not 4 <= len(new_password) <= 1024:
+            raise ValueError("Password must be 4–1024 characters.")
         with self.connect() as db:
             row = db.execute("SELECT password_hash FROM users WHERE id=?", (user_id,)).fetchone()
             if not row:
@@ -177,8 +177,8 @@ class AccountStore:
         if display_name is not None:
             changes["display_name"] = display_name.strip()[:80]
         if password is not None:
-            if len(password) < 12 or len(password) > 1024:
-                raise ValueError("Password must be 12–1024 characters.")
+            if len(password) < 4 or len(password) > 1024:
+                raise ValueError("Password must be 4–1024 characters.")
             changes["password_hash"] = PASSWORDS.hash(password)
         if disabled is not None:
             changes["disabled"] = int(disabled)
