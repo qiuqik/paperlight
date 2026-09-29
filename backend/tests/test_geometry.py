@@ -57,6 +57,17 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(finalize_document_model(model).sections[0].blocks[0].items, expected)
         self.assertEqual(finalize_document_model(model).sections[0].blocks[0].items, expected)
 
+    def test_instruction_panel_is_presented_as_prompt_without_changing_its_text(self) -> None:
+        instruction = "You are a strict and deterministic visual grading system."
+        model = DocumentModel(id="paper", metadata=Metadata(), sections=[
+            Section(id="overview", title="Prompts", blocks=[Block(id="overview-text", type="paragraph", text="We present the prompts.")]),
+            Section(id="panel", title="VLM-as-a-judge", type="appendix", blocks=[Block(id="instruction", type="paragraph", text=instruction),
+                Block(id="rules", type="paragraph", text="EVALUATION PROCEDURE")]),
+            Section(id="next", title="2 Approach", blocks=[Block(id="ordinary", type="paragraph", text="The method starts here.")])])
+        cleaned = finalize_document_model(model)
+        self.assertEqual([section.presentation for section in cleaned.sections], ["article", "prompt", "article"])
+        self.assertEqual(cleaned.sections[1].blocks[0].text, instruction)
+
     def test_pdf_crop_falls_back_to_full_page_render_and_closes_document(self) -> None:
         class FakeImage:
             bounds = None

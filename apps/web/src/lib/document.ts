@@ -7,7 +7,7 @@ export type Block = {
   beforeHeading?: boolean;
   headers?: Array<{text: string} | string>; rows?: Array<Array<{text: string} | string>>;
 };
-export type Section = {id: string; title: string; level: number; type?: string; blocks: Block[]};
+export type Section = {id: string; title: string; level: number; type?: string; presentation?: 'article' | 'prompt'; blocks: Block[]};
 export type Reference = {id: string; number: number; authors: string; title: string; venue?: string; year?: number; doi?: string; preview?: string};
 export type PageGeometry = {number: number; width: number; height: number};
 export type DocumentModel = {

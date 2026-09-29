@@ -47,6 +47,7 @@ class Section(BaseModel):
     title: str
     level: int = 1
     type: Literal["abstract", "body", "appendix"] = "body"
+    presentation: Literal["article", "prompt"] = "article"
     blocks: list[Block] = Field(default_factory=list)
 
 

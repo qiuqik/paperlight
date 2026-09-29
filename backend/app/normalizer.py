@@ -734,6 +734,14 @@ def _list_item_without_marker(text: str) -> str:
     return re.sub(r"^\s*[\u2022\u25cf\u25cb\u25aa\u25e6]\s*", "", text, count=1)
 
 
+def _is_prompt_section(section: Section) -> bool:
+    """Recognize an instruction panel that PDF extraction split into ordinary paragraphs."""
+    if section.type == "abstract":
+        return False
+    first = next((block.text for block in section.blocks if block.type == "paragraph"), "")
+    return bool(re.match(r"^(?:You are |Your task is |You will receive |Act as )", first, re.I))
+
+
 def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] | None = None) -> DocumentModel:
     """Apply layout and citation cleanup to new and previously saved models."""
     sections = model.sections
@@ -771,6 +779,9 @@ def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] 
             reference.preview = ""
 
     blocks = {block.id: block for section in sections for block in section.blocks}
+    for section in sections:
+        if _is_prompt_section(section):
+            section.presentation = "prompt"
     for block in blocks.values():
         if block.type == "list":
             block.items = [_list_item_without_marker(item) for item in block.items]
