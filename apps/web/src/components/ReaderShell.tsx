@@ -18,7 +18,7 @@ const MARK_STYLES: Array<{id: MarkStyle; label: string; Icon: typeof Highlighter
   {id: 'area', label: '区域选择', Icon: Scan},
 ];
 
-type ParserState = {documentId: string; status: string; stage?: string; progress?: number; document?: DocumentModel; error?: string; ownerId?: string; ownerUsername?: string};
+type ParserState = {documentId: string; status: string; stage?: string; progress?: number; document?: DocumentModel; error?: string; ownerId?: string; ownerUsername?: string; formulaStatus?: 'processing' | 'ready' | 'failed'};
 type ServerRecord = {documentId: string; title: string; pageCount: number; status: string; createdAt: number; lastOpenedAt?: number};
 type LibraryRecord = {id: string; name: string; folder: string; size: number};
 const PARSE_STAGE_LABELS: Record<string, string> = {
@@ -191,7 +191,7 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
     root.addEventListener('scroll', onScroll, {passive: true});
     void restore();
     return () => {cancelled = true; cancelAnimationFrame(frame); if (writeTimer) clearTimeout(writeTimer); flush(); root.removeEventListener('scroll', onScroll);};
-  }, [paper, serverId]);
+  }, [serverId]);
 
   useLayoutEffect(() => {
     const root = articleRef.current;
@@ -201,7 +201,33 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
     if (!block) return;
     const bounds = block.getBoundingClientRect();
     root.scrollTop += bounds.top + bounds.height * anchor.blockOffset - root.getBoundingClientRect().top - 24;
-  }, [prefs.fontFamily, prefs.fontSize, prefs.lineHeight, prefs.contentWidth, layout.focus, layout.leftOpen, layout.rightOpen]);
+  }, [paper, prefs.fontFamily, prefs.fontSize, prefs.lineHeight, prefs.contentWidth, layout.focus, layout.leftOpen, layout.rightOpen]);
+
+  useEffect(() => {
+    if (!serverId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = async () => {
+      try {
+        const response = await fetch(`/api/parser/api/documents/${serverId}`, {cache: 'no-store'});
+        if (!response.ok || cancelled) return;
+        const state = await response.json() as ParserState;
+        if (cancelled) return;
+        if (state.formulaStatus === 'processing') {
+          setImportStatus(current => current || '正文已可阅读，公式正在后台排版…');
+          timer = setTimeout(check, 5000);
+        }
+        else if (state.formulaStatus === 'ready' && state.document) {
+          setPaper(current => current.id === state.documentId ? resolveAssetSources(state.document!, serverId) : current);
+          setImportStatus(current => current === '正文已可阅读，公式正在后台排版…' ? '' : current);
+        } else if (state.formulaStatus === 'failed') {
+          setImportStatus(current => current === '正文已可阅读，公式正在后台排版…' ? '公式识别未完成，已保留原始文本' : current);
+        }
+      } catch {if (!cancelled) timer = setTimeout(check, 10000);}
+    };
+    void check();
+    return () => {cancelled = true; if (timer) clearTimeout(timer);};
+  }, [serverId]);
 
   const openDocument = useCallback(async (document: DocumentModel, id: string, ownerId?: string, ownerUsername?: string) => {
     const response = await fetch(`/api/parser/api/documents/${id}/annotations`, {cache: 'no-store'});

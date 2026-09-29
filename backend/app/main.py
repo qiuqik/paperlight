@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from .accounts import AccountStore
 from .model import DOCUMENT_MODEL_VERSION, DocumentModel, ProcessingStatus
-from .normalizer import extract_pdf_references, finalize_document_model, normalize_docling, parse_grobid
+from .normalizer import apply_formula_enrichment, extract_pdf_references, finalize_document_model, normalize_docling, parse_grobid
 
 APP_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("PAPERLIGHT_DATA_DIR", APP_DIR / "storage" / "documents")).resolve()
@@ -41,6 +41,9 @@ jobs: dict[str, dict[str, Any]] = {}
 jobs_lock = Lock()
 annotation_lock = Lock()
 import_lock = Lock()
+formula_lock = Lock()
+formula_active: set[str] = set()
+formula_executor = ThreadPoolExecutor(max_workers=1)
 logger = logging.getLogger(__name__)
 ACCOUNTS = AccountStore(Path(os.environ.get("PAPERLIGHT_DB_PATH", DATA_DIR.parent / "paperlight.db")))
 CURRENT_USER: ContextVar[dict[str, Any] | None] = ContextVar("paperlight_user", default=None)
@@ -304,12 +307,20 @@ def _job_path(document_id: str) -> Path:
 
 def _set_job(document_id: str, **changes: Any) -> None:
     with jobs_lock:
-        current = jobs.setdefault(document_id, {"documentId": document_id, "status": "processing", "stage": "queued", "progress": 0.0})
+        folder = _document_folder(document_id)
+        current = jobs.get(document_id)
+        if current is None:
+            try:
+                current = json.loads((folder / "status.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                current = {"documentId": document_id, "status": "processing", "stage": "queued", "progress": 0.0}
+            jobs[document_id] = current
         current.update(changes)
         snapshot = dict(current)
-    folder = _document_folder(document_id)
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "status.json").write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+        folder.mkdir(parents=True, exist_ok=True)
+        temporary = folder / "status.json.tmp"
+        temporary.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(folder / "status.json")
     if "status" in changes:
         ACCOUNTS.update_document(document_id, status=changes["status"])
 
@@ -688,6 +699,8 @@ def get_document(document_id: str) -> ProcessingStatus:
     state = _get_job(document_id)
     if not state:
         raise HTTPException(status_code=404, detail="Document not found.")
+    if state.get("status") == "ready" and state.get("formulaStatus") == "processing":
+        _ensure_formula_job(document_id)
     state["ownerId"] = record["owner_id"]
     state["ownerUsername"] = (ACCOUNTS.get_user(record["owner_id"]) or {}).get("username")
     document_path = _document_folder(document_id) / "document.json"
@@ -800,7 +813,7 @@ def _process_document(document_id: str, filename: str) -> None:
                 return converter.convert(str(pdf_path))
 
         options = PdfPipelineOptions(do_ocr=False, do_table_structure=True, generate_picture_images=True,
-                                     images_scale=2.0, do_formula_enrichment=formula_enabled)
+                                     images_scale=2.0, do_formula_enrichment=False)
         result = convert_with_options(options)
         docling_doc = result.document
         ocr_mode = os.environ.get("PAPERLIGHT_OCR_MODE", "auto").lower()
@@ -808,7 +821,7 @@ def _process_document(document_id: str, filename: str) -> None:
         if use_ocr and not options.do_ocr:
             _set_job(document_id, stage="recognizing_scanned_pages", progress=0.48)
             ocr_options = PdfPipelineOptions(do_ocr=True, do_table_structure=True, generate_picture_images=True,
-                                             images_scale=2.0, do_formula_enrichment=formula_enabled)
+                                             images_scale=2.0, do_formula_enrichment=False)
             result = convert_with_options(ocr_options)
             docling_doc = result.document
         (folder / "docling.json").write_text(json.dumps(docling_doc.export_to_dict(), ensure_ascii=False, default=str), encoding="utf-8")
@@ -832,7 +845,9 @@ def _process_document(document_id: str, filename: str) -> None:
                                  authors=model.metadata.authors, page_count=model.metadata.pageCount)
         timings["normalizingSeconds"] = round(time.perf_counter() - normalize_started, 2)
         timings["totalSeconds"] = round(time.perf_counter() - started, 2)
-        _set_job(document_id, status="ready", stage="ready", progress=1.0, timings=timings)
+        has_equations = any(block.type == "equation" for section in model.sections for block in section.blocks)
+        _set_job(document_id, status="ready", stage="ready", progress=1.0, timings=timings, formulaOcr=use_ocr,
+                 formulaStatus="processing" if formula_enabled and has_equations else "ready")
     except Exception as exc:  # Persist failure so the client can explain it.
         timings["totalSeconds"] = round(time.perf_counter() - started, 2)
         _set_job(document_id, status="failed", stage="failed", progress=1.0, error=str(exc)[:800], timings=timings)
@@ -841,6 +856,58 @@ def _process_document(document_id: str, filename: str) -> None:
             executor.shutdown(wait=False, cancel_futures=True)
         with import_lock:
             _save_result(document_id)
+    if (_get_job(document_id) or {}).get("formulaStatus") == "processing":
+        _ensure_formula_job(document_id)
+
+
+def _ensure_formula_job(document_id: str) -> None:
+    with formula_lock:
+        if document_id in formula_active:
+            return
+        formula_active.add(document_id)
+    formula_executor.submit(_enrich_formulas, document_id)
+
+
+def _enrich_formulas(document_id: str) -> None:
+    started = time.perf_counter()
+    try:
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+
+        folder = _document_folder(document_id)
+        state = _get_job(document_id) or {}
+        path = folder / "document.json"
+        model = DocumentModel(**json.loads(path.read_text(encoding="utf-8")))
+        formula_pages = [block.page for section in model.sections for block in section.blocks
+                         if block.type == "equation" and block.page]
+        if not formula_pages:
+            _set_job(document_id, formulaStatus="ready")
+            return
+        options = PdfPipelineOptions(do_ocr=bool(state.get("formulaOcr")), do_table_structure=False,
+                                     generate_picture_images=False, images_scale=2.0, do_formula_enrichment=True)
+        converter = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)})
+        enriched = converter.convert(str(folder / "original.pdf"), page_range=(min(formula_pages), max(formula_pages))).document
+        count = apply_formula_enrichment(model, enriched.export_to_dict())
+        if not ACCOUNTS.document(document_id):
+            return
+        temporary = folder / "document-formulas.json.tmp"
+        temporary.write_text(model.model_dump_json(), encoding="utf-8")
+        temporary.replace(path)
+        state = _get_job(document_id) or {}
+        timings = dict(state.get("timings") or {})
+        timings["formulaSeconds"] = round(time.perf_counter() - started, 2)
+        _set_job(document_id, formulaStatus="ready", timings=timings)
+        logger.info("Formula recognition completed for %s: %s rendered", document_id, count)
+        with import_lock:
+            _save_result(document_id)
+    except Exception:
+        logger.exception("Formula recognition failed for %s", document_id)
+        if ACCOUNTS.document(document_id):
+            _set_job(document_id, formulaStatus="failed")
+    finally:
+        with formula_lock:
+            formula_active.discard(document_id)
 
 
 initialize_accounts()

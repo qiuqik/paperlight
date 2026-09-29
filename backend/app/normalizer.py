@@ -742,9 +742,15 @@ def _formula_without_number(text: str, number: int | None) -> str:
     return value.strip()
 
 
-def _usable_formula_latex(candidate: str, source: str) -> str:
+def _usable_formula_latex(candidate: str, source: str, number: int | None = None) -> str:
     """Reject OCR math that adds numbers or visibly fragmented commands."""
     value = candidate.strip().strip("$").strip()
+    if number is not None:
+        value = re.split(rf"&\s*&\s*\(\s*{number}\s*\)", value, maxsplit=1)[0].strip()
+        value = re.sub(rf"(?:\\\s*)?\(\s*{number}\s*\)\s*$", "", value).strip()
+    prefix = re.match(r"^\\text\s*\{\s*([A-Za-z]+)\s*\}\s*\\quad\s*", value)
+    if prefix and not re.search(rf"\b{re.escape(prefix.group(1))}\b", source, re.I):
+        value = value[prefix.end():].strip()
     if not value or "\\" not in value or "�" in value or value.count("{") != value.count("}"):
         return ""
     if re.search(r"\\\s+[A-Za-z](?:\s+[A-Za-z]){2,}", value):
@@ -755,6 +761,38 @@ def _usable_formula_latex(candidate: str, source: str) -> str:
             return ""
         source_numbers.remove(number)
     return value
+
+
+def apply_formula_enrichment(model: DocumentModel, docling_data: dict[str, Any]) -> int:
+    """Attach recognized math to existing blocks without changing their IDs or text."""
+    heights = {int(page["number"]): float(page["height"]) for page in model.pages}
+    equations = [block for section in model.sections for block in section.blocks
+                 if block.type == "equation" and block.page and block.bbox]
+    remaining = {block.id: block for block in equations}
+    updated = 0
+    for item in docling_data.get("texts", []):
+        if item.get("label") not in {"formula", "display_formula"} or not item.get("prov"):
+            continue
+        location = item["prov"][0]
+        page = int(location.get("page_no", 0))
+        box = location.get("bbox") or {}
+        if page not in heights or not all(key in box for key in ("l", "r", "t", "b")):
+            continue
+        top = heights[page] - float(box["t"]) if box.get("coord_origin") == "BOTTOMLEFT" else float(box["t"])
+        left = float(box["l"])
+        matches = [(abs(block.bbox["x"] - left) + abs(block.bbox["y"] - top), block)
+                   for block in remaining.values() if block.page == page and block.bbox]
+        if not matches:
+            continue
+        distance, block = min(matches, key=lambda entry: entry[0])
+        if distance > 25:
+            continue
+        remaining.pop(block.id)
+        latex = _usable_formula_latex(item.get("text") or "", block.text, block.number)
+        if latex:
+            block.latex = latex
+            updated += 1
+    return updated
 
 
 def _recover_pdf_formula(block: Block, pdf_document: Any) -> str:
@@ -1373,7 +1411,7 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             equation_id = f"equation-{len(sections)}-{len(current.blocks) if current else 0}"
             number = _formula_number(location, pdf_document)
             original_formula = _formula_without_number(getattr(item, "orig", "") or text, number)
-            latex = _usable_formula_latex(text, original_formula)
+            latex = _usable_formula_latex(text, original_formula, number)
             block = Block(id=equation_id, type="equation", text=original_formula or "公式未能识别", latex=latex,
                           page=_page_no(item), number=number)
         elif label == "code":

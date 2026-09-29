@@ -109,3 +109,4 @@ class ProcessingStatus(BaseModel):
     document: DocumentModel | None = None
     error: str | None = None
     timings: dict[str, float] = Field(default_factory=dict)
+    formulaStatus: Literal["processing", "ready", "failed"] | None = None
