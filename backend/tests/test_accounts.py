@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -15,9 +16,10 @@ class AccountApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.old_data_dir, self.old_accounts = main.DATA_DIR, main.ACCOUNTS
+        self.old_data_dir, self.old_accounts, self.old_result_dir = main.DATA_DIR, main.ACCOUNTS, main.RESULT_DIR
         main.DATA_DIR = self.root / "documents"
         main.DATA_DIR.mkdir()
+        main.RESULT_DIR = self.root / "result"
         main.ACCOUNTS = AccountStore(self.root / "paperlight.db")
         main.ACCOUNTS.initialize()
         self.admin = main.ACCOUNTS.create_user("admin", "admin-password-123", "admin")
@@ -44,7 +46,7 @@ class AccountApiTests(unittest.TestCase):
             self.assertNotIn("password_hash", response.text)
 
     def tearDown(self) -> None:
-        main.DATA_DIR, main.ACCOUNTS = self.old_data_dir, self.old_accounts
+        main.DATA_DIR, main.ACCOUNTS, main.RESULT_DIR = self.old_data_dir, self.old_accounts, self.old_result_dir
         main.jobs.clear()
         self.temp.cleanup()
 
@@ -72,6 +74,39 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(self.admin_client.get(f"/api/documents/{doc}/annotations").json()[0]["note"], "private note")
         self.assertEqual(self.admin_client.patch(f"/api/annotations/{note['id']}", json={"note": "admin edit"}).status_code, 200)
         self.assertEqual(self.alice_client.get(f"/api/documents/{doc}/annotations").json()[0]["note"], "admin edit")
+
+    def test_arxiv_version_is_pinned_and_imports_are_private(self) -> None:
+        from backend.app.arxiv_source import ArxivSource
+        source = ArxivSource("2603.17965", 1, "https://arxiv.org/abs/2603.17965")
+        with patch.object(main, "resolve_arxiv_url", return_value=source), patch.object(main, "_process_document"):
+            first = self.alice_client.post("/api/documents/arxiv", json={"url": source.submitted_url})
+            self.assertEqual(first.status_code, 202)
+            alice_id = first.json()["documentId"]
+            self.assertEqual(first.json()["arxivVersion"], 1)
+            self.assertEqual(self.alice_client.post("/api/documents/arxiv", json={"url": source.submitted_url}).json()["documentId"], alice_id)
+            bob_id = self.bob_client.post("/api/documents/arxiv", json={"url": source.submitted_url}).json()["documentId"]
+        self.assertNotEqual(alice_id, bob_id)
+        self.assertEqual(self.bob_client.get(f"/api/documents/{alice_id}").status_code, 404)
+        self.assertEqual(self.alice_client.get(f"/api/documents/{bob_id}").status_code, 404)
+        self.assertEqual(main._get_job(alice_id)["arxivVersion"], 1)
+
+    def test_original_pdf_and_formula_revision_are_private(self) -> None:
+        doc = self.document_id
+        folder = main._document_folder(doc)
+        (folder / "original.pdf").write_bytes(b"%PDF-private")
+        model = json.loads((folder / "document.json").read_text(encoding="utf-8"))
+        model["sections"][0].update(id="body", title="Body")
+        model["sections"][0]["blocks"][0]["type"] = "paragraph"
+        model["sections"][0]["blocks"].append({"id": "equation-1", "type": "equation", "src": f"/api/documents/{doc}/assets/figure.png", "text": "x = 1"})
+        (folder / "document.json").write_text(json.dumps(model), encoding="utf-8")
+        self.assertEqual(self.bob_client.get(f"/api/documents/{doc}/original.pdf").status_code, 404)
+        self.assertEqual(self.alice_client.get(f"/api/documents/{doc}/original.pdf").content, b"%PDF-private")
+        path = f"/api/documents/{doc}/formulas/equation-1"
+        self.assertEqual(self.bob_client.patch(path, json={"revised": "x_1=1"}).status_code, 404)
+        self.assertEqual(self.alice_client.patch(path, json={"revised": "x_1=1"}).status_code, 200)
+        self.assertEqual(self.alice_client.get(f"/api/documents/{doc}").json()["document"]["sections"][0]["blocks"][1]["latex"], "x_1=1")
+        self.assertTrue((main.RESULT_DIR / "users" / self.alice["id"] / doc / "formula-recognitions.json").is_file())
+        self.assertFalse((main.RESULT_DIR / doc).exists())
 
     def test_settings_progress_and_account_management(self) -> None:
         doc = self.document_id

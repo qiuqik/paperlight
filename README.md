@@ -1,6 +1,6 @@
 # Paperlight · 结构化论文阅读器
 
-Paperlight 将 PDF 解析为稳定的 Document Model，再由 Next.js 阅读器按章节、段落、图表、公式和参考文献渲染。Web、Python parser 与 GROBID 由项目根目录的 Docker Compose 管理。
+Paperlight 将上传的 PDF 或固定版本的 arXiv 官方 HTML 解析为统一的 Document Model，再由 Next.js 阅读器按章节、段落、图表、公式和参考文献渲染。Web、Python parser 与 GROBID 由项目根目录的 Docker Compose 管理。
 
 ## 启动与远程访问
 
@@ -25,12 +25,12 @@ Windows 主机必须保持开机且已登录，Docker Desktop 与 Tailscale 需�
 
 - 首次安装时由管理员初始化账号，密码从标准输入读取，不写入数据库明文：`$password = Read-Host -MaskInput '初始管理员密码'; $password | docker compose run --rm -T parser python -m app.bootstrap_admin --username admin`。密码至少 4 位，可以使用纯数字。现有服务器论文会登记到初始管理员名下，原文件不会移动。
 - 管理员登录后从「管理」创建、停用或删除其他用户，并可重置密码。默认「我的论文」只显示当前账号的文档；管理员在用户管理页选择用户后可查看其论文。
-- 登录后先进入 Library，可导入 PDF、查看最近阅读和全部论文、搜索与收藏；点击论文进入 Reader，恢复阅读位置、笔记和设置。PDF 和解析资源保存在 `userdata/users/{user_id}/documents/{document_id}/`，文档归属、笔记、阅读进度、收藏和设置保存在 `userdata/paperlight.db`。不同设备使用同一账号即可恢复。
+- 登录后先进入 Library，可上传 PDF 或粘贴 arXiv `abs/pdf/html` 链接，并查看最近阅读、搜索与收藏。无版本链接在导入时读取 arXiv 官方版本记录并固定；官方 HTML 不完整时回退到该版本 PDF。点击论文进入 Reader，恢复阅读位置、笔记和设置。原文与解析资源保存在 `userdata/users/{user_id}/documents/{document_id}/`，文档归属、笔记、阅读进度、收藏和设置保存在 `userdata/paperlight.db`。不同设备使用同一账号即可恢复。
 - 账号菜单提供个人资料、阅读设置、修改密码和退出登录；管理员还可进入管理后台。用户可删除自己的论文；管理员可管理其他用户的论文和账户。删除账户会一并清理其服务器数据。
 - 阅读器提供高亮、下划线、区域标记、笔记、专注模式以及可持久化的排版设置。
 - 升级前保存在 `userdata/documents/` 的文档仍留在原位，数据库会将其登记为管理员的文档。旧版浏览器或用户自选文件夹内的数据不会自动删除；如有尚未同步的笔记，请先保留这些备份。
-- `result/` 保存解析快照。`userdata/` 与 `result/` 都不提交到 Git。
-- Docling 模型保存在 Docker 卷中。GROBID 用于引用和元数据增强；公式识别不可靠时显示原 PDF 裁图。
+- `result/users/{user_id}/{document_id}/` 保存对应账号的解析调试快照；旧文档的历史快照仍可能在 `result/{document_id}/`。`userdata/` 与 `result/` 都不提交到 Git。
+- Docling 模型保存在 Docker 卷中。GROBID 用于 PDF 引用和元数据增强。PDF 行间公式显示原 PDF 裁图；检测到位置可靠但转写不可靠的行内公式时显示原 PDF 段落，并可打开原页。视觉模型的转写仅供复制或修订，不替代原公式。
 
 ## 项目结构
 

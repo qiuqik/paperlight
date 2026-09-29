@@ -763,38 +763,6 @@ def _usable_formula_latex(candidate: str, source: str, number: int | None = None
     return value
 
 
-def apply_formula_enrichment(model: DocumentModel, docling_data: dict[str, Any]) -> int:
-    """Attach recognized math to existing blocks without changing their IDs or text."""
-    heights = {int(page["number"]): float(page["height"]) for page in model.pages}
-    equations = [block for section in model.sections for block in section.blocks
-                 if block.type == "equation" and block.page and block.bbox]
-    remaining = {block.id: block for block in equations}
-    updated = 0
-    for item in docling_data.get("texts", []):
-        if item.get("label") not in {"formula", "display_formula"} or not item.get("prov"):
-            continue
-        location = item["prov"][0]
-        page = int(location.get("page_no", 0))
-        box = location.get("bbox") or {}
-        if page not in heights or not all(key in box for key in ("l", "r", "t", "b")):
-            continue
-        top = heights[page] - float(box["t"]) if box.get("coord_origin") == "BOTTOMLEFT" else float(box["t"])
-        left = float(box["l"])
-        matches = [(abs(block.bbox["x"] - left) + abs(block.bbox["y"] - top), block)
-                   for block in remaining.values() if block.page == page and block.bbox]
-        if not matches:
-            continue
-        distance, block = min(matches, key=lambda entry: entry[0])
-        if distance > 25:
-            continue
-        remaining.pop(block.id)
-        latex = _usable_formula_latex(item.get("text") or "", block.text, block.number)
-        if latex:
-            block.latex = latex
-            updated += 1
-    return updated
-
-
 def _recover_pdf_formula(block: Block, pdf_document: Any) -> str:
     if not pdf_document or not block.page or not block.bbox:
         return ""
@@ -971,11 +939,10 @@ def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] 
     for block in blocks.values():
         if block.type == "list":
             block.items = [_list_item_without_marker(item) for item in block.items]
-        if block.type == "paragraph" and block.src and (block.text or block.content):
+        if block.type == "paragraph" and block.src and block.source != "pdf_original_paragraph" and (block.text or block.content):
             block.src = None
         if block.type == "equation":
             block.text = _formula_without_number(block.text, block.number) or "公式未能识别"
-            block.src = None
         if block.type in {"figure", "table"} and block.caption:
             block.captionContent = _numbered_citations(block.caption, model.references)
     model.figures = [blocks.get(figure.id, figure) for figure in model.figures]
@@ -1412,8 +1379,12 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             number = _formula_number(location, pdf_document)
             original_formula = _formula_without_number(getattr(item, "orig", "") or text, number)
             latex = _usable_formula_latex(text, original_formula, number)
+            crop_path = document_dir / "assets" / f"{equation_id}.png"
+            crop_path.parent.mkdir(parents=True, exist_ok=True)
+            crop_src = (f"/api/documents/{document_id}/assets/{crop_path.name}"
+                        if _render_picture_from_pdf(document_dir / "original.pdf", item, crop_path, margin=2) else None)
             block = Block(id=equation_id, type="equation", text=original_formula or "公式未能识别", latex=latex,
-                          page=_page_no(item), number=number)
+                          page=_page_no(item), number=number, src=crop_src, source="pdf_original")
         elif label == "code":
             code_id = f"code-{len(sections)}-{len(current.blocks) if current else 0}"
             asset_path = document_dir / "assets" / f"{code_id}.png"

@@ -16,7 +16,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Lock
 from typing import Any
-from xml.etree import ElementTree as ET
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Response, UploadFile
@@ -25,7 +24,11 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from .accounts import AccountStore
 from .model import DOCUMENT_MODEL_VERSION, DocumentModel, ProcessingStatus
-from .normalizer import apply_formula_enrichment, extract_pdf_references, finalize_document_model, normalize_docling, parse_grobid
+from .arxiv_html import parse_arxiv_html
+from .arxiv_source import ArxivSource, fetch_pinned_pdf, official_get, resolve_arxiv_url
+from .normalizer import finalize_document_model
+from .pdf_pipeline import parse_pdf
+from .vision import configured_provider, transcribe_file
 
 APP_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("PAPERLIGHT_DATA_DIR", APP_DIR / "storage" / "documents")).resolve()
@@ -42,6 +45,7 @@ jobs_lock = Lock()
 annotation_lock = Lock()
 import_lock = Lock()
 formula_lock = Lock()
+formula_data_lock = Lock()
 formula_active: set[str] = set()
 formula_executor = ThreadPoolExecutor(max_workers=1)
 logger = logging.getLogger(__name__)
@@ -279,26 +283,19 @@ def _save_result(document_id: str) -> None:
     if RESULT_DIR is None:
         return
     try:
-        shutil.copytree(_document_folder(document_id), RESULT_DIR / document_id, dirs_exist_ok=True)
+        record = ACCOUNTS.document(document_id)
+        if not record:
+            return
+        destination = RESULT_DIR / "users" / record["owner_id"] / document_id if record["storage_path"].startswith("users/") else RESULT_DIR / document_id
+        shutil.copytree(_document_folder(document_id), destination, dirs_exist_ok=True)
     except OSError:
         logger.exception("Could not save parsing result for %s", document_id)
 
 
-def _fetch_grobid(pdf_path: Path, filename: str, folder: Path) -> dict[str, Any]:
-    try:
-        with pdf_path.open("rb") as source:
-            response = httpx.post(
-                f"{GROBID_URL}/api/processFulltextDocument",
-                files={"input": (filename, source, "application/pdf")},
-                data={"consolidateHeader": "1", "consolidateCitations": "1", "includeRawCitations": "1", "teiCoordinates": ["figure", "table"]},
-                timeout=900,
-            )
-        response.raise_for_status()
-        (folder / "grobid.xml").write_text(response.text, encoding="utf-8")
-        return parse_grobid(response.text)
-    except (httpx.HTTPError, OSError, ValueError, ET.ParseError) as exc:
-        (folder / "grobid-error.txt").write_text(str(exc), encoding="utf-8")
-        return {}
+def _atomic_json(path: Path, value: Any) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
 
 
 def _job_path(document_id: str) -> Path:
@@ -339,29 +336,6 @@ def _get_job(document_id: str) -> dict[str, Any] | None:
         except (OSError, json.JSONDecodeError):
             return None
     return None
-
-
-def _needs_ocr(docling_doc: Any) -> bool:
-    """Only initialize OCR models when the PDF text layer is mostly absent."""
-    page_text: dict[int, int] = {}
-    total_chars = 0
-    for item, _depth in docling_doc.iterate_items():
-        text = str(getattr(item, "text", "") or "").strip()
-        if not text:
-            continue
-        total_chars += len(text)
-        provenance = getattr(item, "prov", None) or []
-        if provenance:
-            page_no = getattr(provenance[0], "page_no", None)
-            if page_no is not None:
-                page_text[page_no] = page_text.get(page_no, 0) + len(text)
-    page_count = len(getattr(docling_doc, "pages", {}) or {})
-    if total_chars < 120:
-        return True
-    if page_count and page_text:
-        sparse_pages = sum(1 for page_no in range(1, page_count + 1) if page_text.get(page_no, 0) < 40)
-        return sparse_pages / page_count >= 0.3
-    return False
 
 
 @app.get("/health")
@@ -436,9 +410,42 @@ async def create_document(background_tasks: BackgroundTasks, file: UploadFile = 
                     return ProcessingStatus(**status)
         ACCOUNTS.add_document(document_id, user["id"], fingerprint, filename,
                               f"users/{user['id']}/documents/{document_id}")
-        _set_job(document_id, documentId=document_id, status="processing", stage="queued", progress=0.02, filename=filename, createdAt=time.time(), fingerprint=fingerprint)
+        _set_job(document_id, documentId=document_id, status="processing", stage="queued", progress=0.02,
+                 filename=filename, createdAt=time.time(), fingerprint=fingerprint, sourceKind="pdf_upload")
     background_tasks.add_task(_process_document, document_id, filename)
     return ProcessingStatus(documentId=document_id, status="processing", stage="queued", progress=0.02)
+
+
+@app.post("/api/documents/arxiv", response_model=ProcessingStatus, status_code=202)
+def import_arxiv(background_tasks: BackgroundTasks, request: dict[str, Any]) -> ProcessingStatus:
+    user = _user()
+    url = request.get("url")
+    if not isinstance(url, str) or len(url) > 300:
+        raise HTTPException(status_code=422, detail="请输入 arXiv 论文链接。")
+    try:
+        with httpx.Client(headers={"User-Agent": "Paperlight/0.3"}, timeout=20) as client:
+            source = resolve_arxiv_url(url, client)
+    except (httpx.HTTPError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)[:300]) from error
+    fingerprint = hashlib.sha256(f"arxiv:{source.versioned_id}".encode()).hexdigest()
+    with import_lock:
+        existing = ACCOUNTS.find_document(user["id"], fingerprint)
+        if existing and (status := _get_job(existing["id"])) and status.get("status") in {"processing", "ready"}:
+            if status["status"] == "ready":
+                return get_document(existing["id"])
+            return ProcessingStatus(**status)
+        document_id = uuid.uuid4().hex
+        folder = DATA_DIR.parent / "users" / user["id"] / "documents" / document_id
+        folder.mkdir(parents=True, exist_ok=False)
+        filename = f"{source.versioned_id}.pdf"
+        ACCOUNTS.add_document(document_id, user["id"], fingerprint, filename,
+                              f"users/{user['id']}/documents/{document_id}")
+        _set_job(document_id, documentId=document_id, status="processing", stage="queued", progress=.02,
+                 filename=filename, createdAt=time.time(), fingerprint=fingerprint, sourceKind="arxiv",
+                 sourceUrl=source.submitted_url, arxivId=source.arxiv_id, arxivVersion=source.version)
+    background_tasks.add_task(_process_document, document_id, filename)
+    return ProcessingStatus(documentId=document_id, status="processing", stage="queued", progress=.02,
+                            sourceUrl=source.submitted_url, arxivId=source.arxiv_id, arxivVersion=source.version)
 
 
 def _read_annotations(folder: Path) -> list[dict[str, Any]]:
@@ -479,6 +486,8 @@ def list_documents(request: Request) -> list[dict[str, Any]]:
             status = json.loads(status_path.read_text(encoding="utf-8"))
             records.append({"documentId": item["id"], "fingerprint": item["fingerprint"],
                             "title": item["title"], "status": status.get("status", item["parse_status"]),
+                            "parseSource": status.get("parseSource", ""), "arxivId": status.get("arxivId", ""),
+                            "arxivVersion": status.get("arxivVersion"),
                             "createdAt": item["created_at"], "lastOpenedAt": item["last_opened_at"],
                             "pageCount": item["page_count"], "annotationCount": len(ACCOUNTS.annotations(item["id"])),
                             "authors": json.loads(item["authors"]), "favorite": bool(item["favorite"]),
@@ -709,7 +718,9 @@ def get_document(document_id: str) -> ProcessingStatus:
             document = json.loads(document_path.read_text(encoding="utf-8"))
             if isinstance(document, dict):
                 document.setdefault("modelVersion", 1)
-                state["document"] = finalize_document_model(DocumentModel(**document), _annotation_block_ids(document_id), _document_folder(document_id)).model_dump()
+                model = DocumentModel(**document)
+                state["document"] = (model if model.source == "arxiv_html" else finalize_document_model(
+                    model, _annotation_block_ids(document_id), _document_folder(document_id))).model_dump()
         except (OSError, json.JSONDecodeError):
             state.update(status="failed", error="Processed document data could not be read.")
     ACCOUNTS.touch_document(document_id)
@@ -748,9 +759,12 @@ def _delete_document_data(document_id: str) -> None:
     if trash.is_dir():
         shutil.rmtree(trash)
     if RESULT_DIR is not None:
-        result_folder = (RESULT_DIR / document_id).resolve()
-        if result_folder.parent == RESULT_DIR.resolve() and result_folder.is_dir() and not result_folder.is_symlink():
-            shutil.rmtree(result_folder)
+        for result_folder in (RESULT_DIR / "users" / record["owner_id"] / document_id, RESULT_DIR / document_id):
+            if result_folder.is_symlink():
+                continue
+            target = result_folder.resolve()
+            if target.is_relative_to(RESULT_DIR.resolve()) and target.is_dir():
+                shutil.rmtree(target)
 
 
 @app.delete("/api/documents/{document_id}", status_code=204)
@@ -771,89 +785,105 @@ def get_asset(document_id: str, asset_name: str) -> FileResponse:
     return FileResponse(target)
 
 
+@app.get("/api/documents/{document_id}/original.pdf")
+def get_original_pdf(document_id: str) -> FileResponse:
+    _document_record(document_id)
+    path = _document_folder(document_id) / "original.pdf"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="This document has no PDF original.")
+    return FileResponse(path, media_type="application/pdf", content_disposition_type="inline")
+
+
+@app.patch("/api/documents/{document_id}/formulas/{block_id}")
+def revise_formula(document_id: str, block_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+    _document_record(document_id)
+    revised = changes.get("revised")
+    if not isinstance(revised, str) or len(revised) > 5000:
+        raise HTTPException(status_code=422, detail="Formula revision must be text under 5000 characters.")
+    folder = _document_folder(document_id)
+    path = folder / "document.json"
+    with formula_data_lock:
+        model = DocumentModel(**json.loads(path.read_text(encoding="utf-8")))
+        block = next((item for section in model.sections for item in section.blocks if item.id == block_id and item.type == "equation"), None)
+        if not block:
+            raise HTTPException(status_code=404, detail="Formula not found.")
+        record = dict(block.recognition)
+        record["originalAsset"] = Path(block.src).name if block.src else ""
+        record["revised"] = revised.strip()
+        record["revisionSource"] = "user"
+        record["revisedBy"] = _user()["id"]
+        record["revisedAt"] = time.time()
+        block.recognition = record
+        block.latex = record["revised"] or record.get("rawOutput", "")
+        _atomic_json(path, model.model_dump(mode="json"))
+        evidence_path = folder / "formula-recognitions.json"
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8")) if evidence_path.is_file() else {}
+        evidence[block_id] = record
+        _atomic_json(evidence_path, evidence)
+    with import_lock:
+        _save_result(document_id)
+    return record
+
+
 def _process_document(document_id: str, filename: str) -> None:
     folder = _document_folder(document_id)
-    pdf_path = folder / "original.pdf"
     started = time.perf_counter()
     timings: dict[str, float] = {}
-    executor: ThreadPoolExecutor | None = None
     try:
         _set_job(document_id, stage="loading_parser", progress=0.08)
-        try:
-            from docling.datamodel.base_models import InputFormat
-            from docling.datamodel.pipeline_options import PdfPipelineOptions
-            from docling.document_converter import DocumentConverter, PdfFormatOption
-        except ImportError as exc:
-            raise RuntimeError("Docling is not installed. Install backend/requirements.txt before processing PDFs.") from exc
-
-        reference_started = time.perf_counter()
-        fallback_references = extract_pdf_references(pdf_path)
-        timings["referenceScanSeconds"] = round(time.perf_counter() - reference_started, 2)
-        reference_mode = os.environ.get("PAPERLIGHT_REFERENCE_MODE", "auto").lower()
-        use_grobid = reference_mode == "full" or (reference_mode != "fast" and len(fallback_references) < 10)
-        if use_grobid:
-            executor = ThreadPoolExecutor(max_workers=1)
-            grobid_started = time.perf_counter()
-            grobid_future = executor.submit(_fetch_grobid, pdf_path, filename, folder)
-
-        _set_job(document_id, stage="extracting_structure", progress=0.15)
-        docling_started = time.perf_counter()
-        formula_enabled = os.environ.get("PAPERLIGHT_FORMULA_MODE", "on").lower() != "off"
-
-        def convert_with_options(options: PdfPipelineOptions):
-            converter = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)})
+        state = _get_job(document_id) or {}
+        source_kind = state.get("sourceKind", "pdf_upload")
+        source = None
+        fallback_reason = ""
+        if source_kind == "arxiv":
+            source = ArxivSource(state["arxivId"], int(state["arxivVersion"]), state["sourceUrl"])
+            _set_job(document_id, stage="fetching_arxiv_html", progress=0.12)
             try:
-                return converter.convert(str(pdf_path))
-            except Exception:
-                if not options.do_formula_enrichment:
-                    raise
-                logger.exception("Formula recognition failed for %s; retrying text extraction", document_id)
-                options.do_formula_enrichment = False
-                converter = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)})
-                return converter.convert(str(pdf_path))
-
-        options = PdfPipelineOptions(do_ocr=False, do_table_structure=True, generate_picture_images=True,
-                                     images_scale=2.0, do_formula_enrichment=False)
-        result = convert_with_options(options)
-        docling_doc = result.document
-        ocr_mode = os.environ.get("PAPERLIGHT_OCR_MODE", "auto").lower()
-        use_ocr = ocr_mode == "always" or (ocr_mode == "auto" and _needs_ocr(docling_doc))
-        if use_ocr and not options.do_ocr:
-            _set_job(document_id, stage="recognizing_scanned_pages", progress=0.48)
-            ocr_options = PdfPipelineOptions(do_ocr=True, do_table_structure=True, generate_picture_images=True,
-                                             images_scale=2.0, do_formula_enrichment=False)
-            result = convert_with_options(ocr_options)
-            docling_doc = result.document
-        (folder / "docling.json").write_text(json.dumps(docling_doc.export_to_dict(), ensure_ascii=False, default=str), encoding="utf-8")
-        timings["doclingSeconds"] = round(time.perf_counter() - docling_started, 2)
-
-        _set_job(document_id, stage="linking_references", progress=0.74)
-        grobid_data = grobid_future.result() if use_grobid else {}
-        timings["grobidSeconds"] = round(time.perf_counter() - grobid_started, 2) if use_grobid else 0.0
-
-        _set_job(document_id, stage="normalizing_document", progress=0.9)
-        normalize_started = time.perf_counter()
-        model = normalize_docling(docling_doc, document_id, folder, grobid_data, fallback_references)
-        model.fingerprint = str(_get_job(document_id).get("fingerprint", ""))
-        if use_grobid and not grobid_data:
-            model.metadata.notice = "GROBID 暂不可用；已尝试从 PDF 文本恢复编号参考文献，期刊、DOI 等出版元数据可能不完整。"
-        elif not grobid_data.get("references"):
-            model.metadata.notice = "正文结构已提取；GROBID 未识别参考文献，因此引用关联可能不完整。"
+                with httpx.Client(headers={"User-Agent": "Paperlight/0.3"}, timeout=30) as client:
+                    html = official_get(client, source.html_url, max_bytes=25_000_000)
+                    (folder / "official.html").write_bytes(html)
+                    model = parse_arxiv_html(html, source, document_id, folder, client)
+                parse_source = "arxiv_html"
+            except (httpx.HTTPError, ValueError, OSError) as error:
+                fallback_reason = str(error)[:300]
+                logger.info("Official arXiv HTML unavailable for %s: %s; using PDF", source.versioned_id, fallback_reason)
+                _set_job(document_id, stage="fetching_arxiv_pdf", progress=0.14, fallbackReason=fallback_reason)
+                with httpx.Client(headers={"User-Agent": "Paperlight/0.3"}, timeout=90) as client:
+                    pdf = fetch_pinned_pdf(source, client, MAX_UPLOAD_BYTES)
+                if not pdf.startswith(b"%PDF"):
+                    raise ValueError("arXiv did not return a PDF for the pinned version.")
+                (folder / "original.pdf").write_bytes(pdf)
+                parsed = parse_pdf(folder / "original.pdf", document_id, filename, folder, GROBID_URL,
+                                   lambda stage, progress: _set_job(document_id, stage=stage, progress=progress))
+                model, parse_source = parsed.model, "arxiv_pdf"
+                timings.update(parsed.timings)
+        else:
+            parsed = parse_pdf(folder / "original.pdf", document_id, filename, folder, GROBID_URL,
+                               lambda stage, progress: _set_job(document_id, stage=stage, progress=progress))
+            model, parse_source = parsed.model, "pdf_upload"
+            timings.update(parsed.timings)
+        model.fingerprint = str(state.get("fingerprint", ""))
+        model.source = parse_source
+        model.sourceUrl = source.abs_url if source else ""
+        model.arxivId = source.arxiv_id if source else ""
+        model.arxivVersion = source.version if source else None
+        model.fallbackReason = fallback_reason
         document_json = model.model_dump(mode="json")
-        (folder / "document.json").write_text(json.dumps(document_json, ensure_ascii=False), encoding="utf-8")
+        temporary = folder / "document.json.tmp"
+        temporary.write_text(json.dumps(document_json, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(folder / "document.json")
         ACCOUNTS.update_document(document_id, status="ready", title=model.metadata.title,
                                  authors=model.metadata.authors, page_count=model.metadata.pageCount)
-        timings["normalizingSeconds"] = round(time.perf_counter() - normalize_started, 2)
         timings["totalSeconds"] = round(time.perf_counter() - started, 2)
         has_equations = any(block.type == "equation" for section in model.sections for block in section.blocks)
-        _set_job(document_id, status="ready", stage="ready", progress=1.0, timings=timings, formulaOcr=use_ocr,
-                 formulaStatus="processing" if formula_enabled and has_equations else "ready")
+        recognize = parse_source != "arxiv_html" and bool(configured_provider()) and has_equations
+        _set_job(document_id, status="ready", stage="ready", progress=1.0, timings=timings,
+                 parseSource=parse_source, fallbackReason=fallback_reason,
+                 formulaStatus="processing" if recognize else "ready")
     except Exception as exc:  # Persist failure so the client can explain it.
         timings["totalSeconds"] = round(time.perf_counter() - started, 2)
         _set_job(document_id, status="failed", stage="failed", progress=1.0, error=str(exc)[:800], timings=timings)
     finally:
-        if executor:
-            executor.shutdown(wait=False, cancel_futures=True)
         with import_lock:
             _save_result(document_id)
     if (_get_job(document_id) or {}).get("formulaStatus") == "processing":
@@ -871,34 +901,48 @@ def _ensure_formula_job(document_id: str) -> None:
 def _enrich_formulas(document_id: str) -> None:
     started = time.perf_counter()
     try:
-        from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import PdfPipelineOptions
-        from docling.document_converter import DocumentConverter, PdfFormatOption
-
-        folder = _document_folder(document_id)
-        state = _get_job(document_id) or {}
-        path = folder / "document.json"
-        model = DocumentModel(**json.loads(path.read_text(encoding="utf-8")))
-        formula_pages = [block.page for section in model.sections for block in section.blocks
-                         if block.type == "equation" and block.page]
-        if not formula_pages:
+        provider = configured_provider()
+        if not provider:
             _set_job(document_id, formulaStatus="ready")
             return
-        options = PdfPipelineOptions(do_ocr=bool(state.get("formulaOcr")), do_table_structure=False,
-                                     generate_picture_images=False, images_scale=2.0, do_formula_enrichment=True)
-        converter = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)})
-        enriched = converter.convert(str(folder / "original.pdf"), page_range=(min(formula_pages), max(formula_pages))).document
-        count = apply_formula_enrichment(model, enriched.export_to_dict())
+        folder = _document_folder(document_id)
+        path = folder / "document.json"
+        model = DocumentModel(**json.loads(path.read_text(encoding="utf-8")))
+        evidence_path = folder / "formula-recognitions.json"
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8")) if evidence_path.is_file() else {}
+        candidates = [block for section in model.sections for block in section.blocks if block.type == "equation" and block.src]
+        failures = 0
+        for block in candidates[:12]:
+            if block.id in evidence:
+                continue
+            asset = folder / "assets" / Path(block.src or "").name
+            if not asset.is_file():
+                continue
+            try:
+                record = transcribe_file(provider, asset)
+                with formula_data_lock:
+                    current = json.loads(evidence_path.read_text(encoding="utf-8")) if evidence_path.is_file() else {}
+                    current[block.id] = {**record, **current.get(block.id, {})}
+                    _atomic_json(evidence_path, current)
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError):
+                failures += 1
+                logger.exception("Vision transcription failed for %s/%s", document_id, block.id)
         if not ACCOUNTS.document(document_id):
             return
-        temporary = folder / "document-formulas.json.tmp"
-        temporary.write_text(model.model_dump_json(), encoding="utf-8")
-        temporary.replace(path)
+        with formula_data_lock:
+            current_model = DocumentModel(**json.loads(path.read_text(encoding="utf-8")))
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8")) if evidence_path.is_file() else {}
+            for section in current_model.sections:
+                for block in section.blocks:
+                    if block.id in evidence:
+                        block.recognition = evidence[block.id]
+                        block.latex = evidence[block.id].get("revised") or evidence[block.id].get("rawOutput", "")
+            _atomic_json(path, current_model.model_dump(mode="json"))
         state = _get_job(document_id) or {}
         timings = dict(state.get("timings") or {})
         timings["formulaSeconds"] = round(time.perf_counter() - started, 2)
-        _set_job(document_id, formulaStatus="ready", timings=timings)
-        logger.info("Formula recognition completed for %s: %s rendered", document_id, count)
+        _set_job(document_id, formulaStatus="ready", timings=timings, formulaFailures=failures)
+        logger.info("Formula transcription completed for %s: %s saved, %s failed", document_id, len(evidence), failures)
         with import_lock:
             _save_result(document_id)
     except Exception:

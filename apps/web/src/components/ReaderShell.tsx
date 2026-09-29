@@ -1,6 +1,6 @@
 'use client';
 import {useCallback, useEffect, useLayoutEffect, useRef, useState} from 'react';
-import {BookOpen, ChevronLeft, ChevronRight, Clock3, FilePlus2, Highlighter, Image, List, Maximize2, Scan, Settings2, StickyNote, Table2, Underline, X} from 'lucide-react';
+import {BookOpen, ChevronLeft, ChevronRight, Clock3, Highlighter, Image, List, Maximize2, Scan, StickyNote, Table2, Underline, X} from 'lucide-react';
 import DocumentRenderer from './DocumentRenderer';
 import AccountMenu from './AccountMenu';
 import type {Account} from './AppShell';
@@ -59,7 +59,6 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
   const colorControlRef = useRef<HTMLDivElement>(null);
   const articleRef = useRef<HTMLElement>(null);
   const readingAnchorRef = useRef<{blockId: string; blockOffset: number} | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
   const areaStart = useRef<{block: HTMLElement; surface: HTMLElement; x: number; y: number} | null>(null);
   const noteSyncTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const pendingCreates = useRef(new Map<string, Promise<void>>());
@@ -356,20 +355,6 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
     void addAnnotation({id: crypto.randomUUID(), documentId: localId, type: 'area', noteEnabled: annotationUI.noteEnabled, color: prefs.activeColor, anchor, createdAt: Date.now()});
   };
 
-  const importPdf = async (file?: File) => {
-    if (!file) return;
-    try {
-      const body = new FormData(); body.set('file', file);
-      setImportStatus('正在上传 PDF…');
-      const response = await fetch('/api/parser/api/documents', {method: 'POST', body});
-      if (!response.ok) throw new Error(`上传失败 (${response.status})`);
-      const state = await waitForDocument(await response.json() as ParserState, setImportStatus);
-      await openDocument(state.document, state.documentId, state.ownerId, state.ownerUsername);
-      setImportStatus('');
-    } catch (error) {setImportStatus(error instanceof Error ? error.message : '导入失败');}
-    if (fileRef.current) fileRef.current.value = '';
-  };
-
   const openHistory = async () => {
     layout.set({historyOpen: true});
     try {
@@ -451,6 +436,5 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
         <h3>全部论文</h3>{serverHistory.length ? serverHistory.map(item => <div className="history-row" key={item.documentId}><button className="history-open" onClick={() => void openServer(item.documentId).catch(error => setImportStatus(error.message))}><strong>{item.title}</strong><small>{item.pageCount} 页 · {item.status}</small></button><button className="history-remove" aria-label={`删除 ${item.title}`} onClick={() => void deleteServerDocument(item.documentId)}>删除</button></div>) : <p className="empty-panel">还没有论文，点击右上角导入 PDF。</p>}
         {user.role === 'admin' && <><h3>服务器文件库</h3>{serverLibrary.map(item => <button key={item.id} onClick={() => void openLibrary(item.id, item.name)}><strong>{item.name}</strong><small>{item.folder === '.' ? '文件库根目录' : item.folder} · {(item.size / 1024 / 1024).toFixed(1)} MB</small></button>)}</>}
       </div></section></div>}
-    <input ref={fileRef} type="file" accept="application/pdf,.pdf" hidden onChange={event => void importPdf(event.target.files?.[0])} />
   </div>;
 }

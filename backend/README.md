@@ -1,6 +1,6 @@
 # Paperlight parser API
 
-The parser runs inside the root Docker Compose stack and is reached through the Next.js `/api/parser` proxy. It converts PDF → Docling/GROBID → normalized `DocumentModel`. OCR runs automatically only when Docling finds a mostly empty text layer; set `PAPERLIGHT_OCR_MODE=always` or `never` to override this behavior.
+The parser runs inside the root Docker Compose stack and is reached through the Next.js `/api/parser` proxy. PDF uploads use Docling, optional GROBID, and original-PDF geometry to produce a normalized `DocumentModel`. arXiv links are pinned to a version and parsed from official HTML; missing or incomplete HTML falls back to the pinned PDF. OCR runs automatically only when Docling finds a mostly empty text layer; set `PAPERLIGHT_OCR_MODE=always` or `never` to override this behavior.
 
 ## Start the full stack on Windows
 
@@ -11,7 +11,7 @@ docker compose up --build -d
 docker compose logs parser
 ```
 
-The Web app listens on `127.0.0.1:8040`. The parser and GROBID have no host ports; the Web app forwards same-origin requests to the parser inside Compose. Source PDFs, parsed assets, history, and notes persist in `userdata/documents/`; Docling models persist in a Docker volume. The Docker image installs CPU-only PyTorch and torchvision, and Compose uses GROBID's smaller CPU/CRF image.
+The Web app listens on `127.0.0.1:8040`. The parser and GROBID have no host ports; the Web app forwards same-origin requests to the parser inside Compose. Each user's source and parsed assets persist in `userdata/users/{user_id}/documents/{document_id}/`; account and annotation records persist in `userdata/paperlight.db`. No parsed source cache is shared between accounts. Docling models persist in a Docker volume. The Docker image installs CPU-only PyTorch and torchvision, and Compose uses GROBID's smaller CPU/CRF image.
 
 For local frontend development only, `backend/docker-compose.yml` can start the parser separately on `127.0.0.1:8000`. Stop the root Compose services before using it, then run these commands from the `backend` directory:
 
@@ -45,6 +45,7 @@ Use a different installed Python version in the first command if needed. Docling
 ## API
 
 - `POST /api/documents/import` (also `/api/documents` and `/parser/jobs`) — multipart field `file`, returns a processing document ID.
+- `POST /api/documents/arxiv` — JSON `{"url":"https://arxiv.org/abs/2603.17965v1"}`; resolves and stores the exact version before processing.
 - `GET /api/documents/{id}` (also `/parser/jobs/{id}`) — processing stage or the normalized document JSON.
 - `GET /api/documents/{id}/model` — the normalized document; returns 409 until parsing succeeds.
 - `DELETE /api/documents/{id}` — removes a finished document and its debug snapshot; returns 409 while parsing is active.
@@ -57,13 +58,17 @@ Use a different installed Python version in the first command if needed. Docling
 - `DELETE /api/documents/{id}/annotations/{annotation_id}` — remove one.
 - `PATCH /api/annotations/{annotation_id}` and `DELETE /api/annotations/{annotation_id}` — document-independent annotation routes.
 - `GET /api/documents/{id}/assets/{name}` — extracted figure image.
+- `GET /api/documents/{id}/original.pdf` — the original uploaded or fallback PDF, when present.
+- `PATCH /api/documents/{id}/formulas/{block_id}` — JSON `{"revised":"..."}` saves a human TeX correction while preserving the original image and model output.
 - `GET /health` — parser availability and GROBID endpoint.
 
-Original PDFs, normalized JSON, raw `docling.json`, optional `grobid.xml`, extracted assets, and `annotations.json` are stored under `userdata/documents/{id}` with Docker Compose. Set `PAPERLIGHT_DATA_DIR` to move storage for a direct Python run. Set `GROBID_URL` if GROBID listens somewhere other than `http://127.0.0.1:8070`. `PAPERLIGHT_CORS_ORIGINS` accepts comma-separated frontend origins; a direct Python run without this setting allows all origins for local development. Uploaded PDFs are limited to 80 MB by default (`MAX_UPLOAD_BYTES`).
+Source HTML or PDF, normalized JSON, raw `docling.json` for PDF, optional `grobid.xml`, extracted assets, and formula provenance are stored in the owner's private document folder with Docker Compose. Set `PAPERLIGHT_DATA_DIR` to move storage for a direct Python run. Set `GROBID_URL` if GROBID listens somewhere other than `http://127.0.0.1:8070`. `PAPERLIGHT_CORS_ORIGINS` accepts comma-separated frontend origins; a direct Python run without this setting allows all origins for local development. Uploaded PDFs are limited to 80 MB by default (`MAX_UPLOAD_BYTES`).
+
+Optional server-only `PAPERLIGHT_DEEPSEEK_API_KEY` enables image transcription with DeepSeek's image-capable `deepseek-flash` model. If absent, `PAPERLIGHT_DOUBAO_API_KEY` and an image-capable `PAPERLIGHT_DOUBAO_VISION_MODEL` enable the Doubao provider. Keep keys in the host environment or an untracked `.env` consumed by root Compose. Transcription is limited to 12 display formulas per document with two concurrent requests and three attempts; failures never block reading. The original PDF crop remains the reading view, and output plus later human corrections are saved separately. Inline PDF formulas are not automatically replaced by model output. alphaXiv MCP is reserved for a later assistant service and is not a body-content source.
 
 Place server library PDFs under `userdata/library/` when using Docker Compose. `PAPERLIGHT_LIBRARY_DIR` changes that root for a direct Python run. The library API lists only regular PDF files within the root and returns opaque IDs, not file paths.
 
-Docker Compose also copies each finished or failed parsing attempt to the repository's local `result/{id}/` directory, including the source PDF, status, raw Docling/GROBID output, normalized JSON, and figure assets. This directory is ignored by Git so it can hold examples for parser debugging. For a direct Python run, set `PAPERLIGHT_RESULT_DIR` to enable the same snapshots.
+Docker Compose also copies each finished or failed parsing attempt to the repository's local `result/users/{owner_id}/{id}/` directory, including its source, status, raw parser output, normalized JSON, and assets. Legacy snapshots may remain in `result/{id}/`. This directory is ignored by Git. For a direct Python run, set `PAPERLIGHT_RESULT_DIR` to enable the same snapshots.
 
 `PAPERLIGHT_REFERENCE_MODE=auto` (default) uses the PDF text layer for clearly numbered bibliographies and skips the slower GROBID pass. Set it to `full` to always run GROBID for richer publication metadata, or `fast` to skip GROBID for every paper. The `status.json` record includes timings for the reference scan, Docling, GROBID, normalization, and the total processing time.
 

@@ -20,6 +20,8 @@ class InlineNode(BaseModel):
     unresolved: bool = False
     src: str | None = None
     latex: str = ""
+    mathml: str = ""
+    source: str = ""
     number: int | None = None
 
 
@@ -28,6 +30,10 @@ class Block(BaseModel):
     type: Literal["paragraph", "heading", "figure", "table", "equation", "list", "quote", "footnote", "requirement", "code"]
     text: str = ""
     latex: str = ""
+    mathml: str = ""
+    source: str = ""
+    sourceUrl: str = ""
+    recognition: dict[str, Any] = Field(default_factory=dict)
     content: list[InlineNode] = Field(default_factory=list)
     level: int | None = None
     page: int | None = None
@@ -97,6 +103,10 @@ class DocumentModel(BaseModel):
     pages: list[dict[str, float]] = Field(default_factory=list)
     citationLinkStatus: Literal["linked", "partial", "unresolved"] = "unresolved"
     source: str = "docling"
+    sourceUrl: str = ""
+    arxivId: str = ""
+    arxivVersion: int | None = None
+    fallbackReason: str = ""
 
 
 class ProcessingStatus(BaseModel):
@@ -110,3 +120,8 @@ class ProcessingStatus(BaseModel):
     error: str | None = None
     timings: dict[str, float] = Field(default_factory=dict)
     formulaStatus: Literal["processing", "ready", "failed"] | None = None
+    sourceUrl: str = ""
+    arxivId: str = ""
+    arxivVersion: int | None = None
+    parseSource: str = ""
+    fallbackReason: str = ""

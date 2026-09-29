@@ -9,7 +9,7 @@ from types import ModuleType
 from unittest.mock import patch
 
 from backend.app.model import Block, DocumentModel, Metadata, Reference, Section
-from backend.app.normalizer import _block_bbox, _formula_number, _formula_without_number, _heading_key, _merge_continuations, _merge_list_item, _place_figures_before_intro, _render_picture_from_pdf, _repair_heading, _reposition_figures, _usable_formula_latex, apply_formula_enrichment, extract_pdf_references, finalize_document_model, normalize_docling
+from backend.app.normalizer import _block_bbox, _formula_number, _formula_without_number, _heading_key, _merge_continuations, _merge_list_item, _place_figures_before_intro, _render_picture_from_pdf, _repair_heading, _reposition_figures, _usable_formula_latex, extract_pdf_references, finalize_document_model, normalize_docling
 from backend.scripts.reorder_wide_figures import repair as repair_wide_figures
 from backend.scripts.repair_list_geometry import repair as repair_list_geometry
 
@@ -94,21 +94,8 @@ class GeometryTests(unittest.TestCase):
             Block(id="paragraph", type="paragraph", text="The result is a + b.", src="/paragraph-crop.png")])])
         cleaned = finalize_document_model(model)
         self.assertEqual(cleaned.sections[0].blocks[0].text, "a = b")
-        self.assertIsNone(cleaned.sections[0].blocks[0].src)
+        self.assertEqual(cleaned.sections[0].blocks[0].src, "/crop.png")
         self.assertIsNone(cleaned.sections[0].blocks[1].src)
-
-    def test_background_formula_enrichment_preserves_block_identity(self) -> None:
-        equation = Block(id="equation-1", type="equation", text="L = α + β", page=2,
-                         bbox={"x": 50, "y": 100, "width": 200, "height": 20})
-        model = DocumentModel(id="paper", metadata=Metadata(), pages=[{"number": 2, "height": 800, "width": 600}],
-                              sections=[Section(id="body", title="Method", blocks=[equation])])
-        snapshot = {"texts": [{"label": "formula", "text": r"L = \alpha + \beta",
-                               "prov": [{"page_no": 2, "bbox": {"l": 50, "r": 250, "t": 700, "b": 680,
-                                                                     "coord_origin": "BOTTOMLEFT"}}]}]}
-        self.assertEqual(apply_formula_enrichment(model, snapshot), 1)
-        self.assertEqual(equation.id, "equation-1")
-        self.assertEqual(equation.text, "L = α + β")
-        self.assertEqual(equation.latex, r"L = \alpha + \beta")
 
     def test_pdf_crop_falls_back_to_full_page_render_and_closes_document(self) -> None:
         class FakeImage:
@@ -376,7 +363,7 @@ class GeometryTests(unittest.TestCase):
         appendix = next(section for section in model.sections if section.type == "appendix")
         self.assertEqual([block.type for block in appendix.blocks], ["paragraph", "equation"])
         self.assertEqual(appendix.blocks[0].text, "Additional results.")
-        self.assertIsNone(appendix.blocks[1].src)
+        self.assertTrue(appendix.blocks[1].src.endswith("/assets/equation-2-1.png"))
         self.assertEqual(appendix.blocks[1].text, "公式未能识别")
 
     def test_lettered_appendix_after_references_is_retained(self) -> None:
