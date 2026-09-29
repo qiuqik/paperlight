@@ -26,8 +26,9 @@ export const useLayout = create<Layout>(set => ({
   focus: false, leftOpen: true, rightOpen: true, rightPanel: 'references', settingsOpen: false, historyOpen: false,
   set: values => set(values),
 }));
-type AnnotationUI = {markStyle: MarkStyle; noteEnabled: boolean; setStyle: (style: MarkStyle) => void; setNoteEnabled: (enabled: boolean) => void};
+type AnnotationUI = {markStyle: MarkStyle | null; noteEnabled: boolean; setStyle: (style: MarkStyle) => void; setNoteEnabled: (enabled: boolean) => void};
 export const useAnnotationUI = create<AnnotationUI>(set => ({
-  markStyle: 'highlight', noteEnabled: false,
-  setStyle: markStyle => set({markStyle}), setNoteEnabled: noteEnabled => set({noteEnabled}),
+  markStyle: null, noteEnabled: false,
+  setStyle: style => set(current => ({markStyle: current.markStyle === style ? null : style})),
+  setNoteEnabled: noteEnabled => set({noteEnabled}),
 }));

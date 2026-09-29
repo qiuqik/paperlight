@@ -315,7 +315,7 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
     }
   };
   const onTextSelection = () => {
-    if (annotationUI.markStyle === 'area' || !articleRef.current || !serverId) return;
+    if (!annotationUI.markStyle || annotationUI.markStyle === 'area' || !articleRef.current || !serverId) return;
     const anchor = captureAnchor(articleRef.current);
     if (!anchor) return;
     const record: Annotation = {id: crypto.randomUUID(), documentId: localId, type: annotationUI.noteEnabled ? 'note' : annotationUI.markStyle, style: annotationUI.markStyle, noteEnabled: annotationUI.noteEnabled, color: prefs.activeColor, anchor, note: '', createdAt: Date.now()};
