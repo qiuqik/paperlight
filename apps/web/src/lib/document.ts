@@ -3,6 +3,7 @@ export type InlineNode = {type: string; text?: string; display?: string; bold?: 
 export type Block = {
   id: string; type: string; text?: string; content?: InlineNode[]; page?: number; bbox?: Box; order?: number;
   items?: string[]; number?: number; label?: string; caption?: string; src?: string;
+  captionContent?: InlineNode[];
   beforeHeading?: boolean;
   headers?: Array<{text: string} | string>; rows?: Array<Array<{text: string} | string>>;
 };
@@ -26,6 +27,6 @@ export function resolveAssetSources(document: DocumentModel, serverId?: string):
     if (serverId && value.startsWith('/api/documents/')) return `/api/parser${value}`;
     return value;
   };
-  const fix = (block: Block) => ({...block, src: src(block.src), content: block.content?.map(node => ({...node, src: src(node.src)}))});
+  const fix = (block: Block) => ({...block, src: src(block.src), content: block.content?.map(node => ({...node, src: src(node.src)})), captionContent: block.captionContent?.map(node => ({...node, src: src(node.src)}))});
   return {...document, sections: document.sections.map(section => ({...section, blocks: section.blocks.map(fix)})), figures: document.figures.map(fix), tables: document.tables.map(fix)};
 }

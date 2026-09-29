@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from .accounts import AccountStore
 from .model import DOCUMENT_MODEL_VERSION, DocumentModel, ProcessingStatus
-from .normalizer import extract_pdf_references, normalize_docling, parse_grobid
+from .normalizer import extract_pdf_references, finalize_document_model, normalize_docling, parse_grobid
 
 APP_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("PAPERLIGHT_DATA_DIR", APP_DIR / "storage" / "documents")).resolve()
@@ -363,6 +363,18 @@ def health() -> dict[str, Any]:
     return {"status": "ok", "doclingAvailable": docling_available, "grobidUrl": GROBID_URL}
 
 
+def _annotation_block_ids(document_id: str) -> set[str]:
+    protected: set[str] = set()
+    for annotation in ACCOUNTS.annotations(document_id):
+        anchor = annotation.get("anchor")
+        if not isinstance(anchor, dict):
+            continue
+        for part in (anchor, anchor.get("start"), anchor.get("end")):
+            if isinstance(part, dict) and isinstance(part.get("blockId"), str):
+                protected.add(part["blockId"])
+    return protected
+
+
 @app.post("/api/documents/import", response_model=ProcessingStatus, status_code=202)
 @app.post("/parser/jobs", response_model=ProcessingStatus, status_code=202)
 @app.post("/api/documents", response_model=ProcessingStatus, status_code=202)
@@ -403,7 +415,7 @@ async def create_document(background_tasks: BackgroundTasks, file: UploadFile = 
                     try:
                         document = json.loads((_document_folder(existing["id"]) / "document.json").read_text(encoding="utf-8"))
                         if document.get("modelVersion") == DOCUMENT_MODEL_VERSION:
-                            status["document"] = document
+                            status["document"] = finalize_document_model(DocumentModel(**document), _annotation_block_ids(existing["id"])).model_dump()
                         else:
                             status = None
                     except (OSError, ValueError):
@@ -684,7 +696,7 @@ def get_document(document_id: str) -> ProcessingStatus:
             document = json.loads(document_path.read_text(encoding="utf-8"))
             if isinstance(document, dict):
                 document.setdefault("modelVersion", 1)
-            state["document"] = document
+                state["document"] = finalize_document_model(DocumentModel(**document), _annotation_block_ids(document_id)).model_dump()
         except (OSError, json.JSONDecodeError):
             state.update(status="failed", error="Processed document data could not be read.")
     ACCOUNTS.touch_document(document_id)

@@ -49,10 +49,18 @@ def _children(element: ET.Element | None, name: str) -> list[ET.Element]:
     return [item for item in element.iter() if item.tag == TEI + name]
 
 
-def _heading_key(text: str) -> str:
+def _heading_without_number(text: str) -> str:
     value = _repair_heading(text)
-    value = re.sub(r"^(?:[IVXLCDM]+|\d+(?:\.\d+)*|[A-Z])[.)]?\s+", "", value, flags=re.I)
-    return clean_text(value).casefold().rstrip(".")
+    for _ in range(3):
+        unnumbered = re.sub(r"^(?:[IVXLCDM]+[.)]?|\d+(?:\.\d+)*[.)]?|[A-Z][.)])\s+", "", value, flags=re.I)
+        if unnumbered == value:
+            break
+        value = _repair_heading(unnumbered)
+    return value
+
+
+def _heading_key(text: str) -> str:
+    return clean_text(_heading_without_number(text)).casefold().rstrip(".")
 
 
 def _renumber_sections(sections: list[Section]) -> None:
@@ -63,7 +71,7 @@ def _renumber_sections(sections: list[Section]) -> None:
     for section in sections:
         if section.type in {"abstract", "appendix"}:
             continue
-        title = re.sub(r"^(?:[IVXLCDM]+|\d+(?:\.\d+)*|[A-Z])[.)]?\s+", "", section.title, flags=re.I)
+        title = _heading_without_number(section.title)
         if title == title.upper() and re.search(r"[A-Z]", title):
             title = title.title()
         title = re.sub(r"\b(ai|llm|gis|vis|ieee|tvcg)\b", lambda match: match.group(1).upper(), title, flags=re.I)
@@ -709,6 +717,66 @@ def _numbered_citations(text: str, references: list[Reference]) -> list[InlineNo
     return nodes or [InlineNode(type="text", text=text)]
 
 
+def _compact_text(value: str) -> str:
+    return "".join(char for char in clean_text(value).casefold() if char.isalnum())
+
+
+def _is_duplicate_author_line(text: str, authors: list[str]) -> bool:
+    if len(authors) < 2:
+        return False
+    roster = "".join(_compact_text(author) for author in authors)
+    candidate = _compact_text(re.sub(r"\band\b", "", text, flags=re.I))
+    return bool(roster) and candidate == roster
+
+
+def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] | None = None) -> DocumentModel:
+    """Apply layout and citation cleanup to new and previously saved models."""
+    sections = model.sections
+    protected_block_ids = protected_block_ids or set()
+    index = 0
+    while index + 1 < len(sections):
+        current, following = sections[index:index + 2]
+        if (current.type == following.type == "body" and current.level == following.level
+                and _heading_key(current.title) == _heading_key(following.title)):
+            current.blocks.extend(following.blocks)
+            sections.pop(index + 1)
+            continue
+        index += 1
+
+    first_body = next((section for section in sections if section.type == "body"), None)
+    if first_body:
+        first_body.blocks = [block for block in first_body.blocks if not (
+            block.id not in protected_block_ids and block.type == "paragraph" and block.page == 1
+            and _is_duplicate_author_line(block.text, model.metadata.authors))]
+
+    abstract = next((section for section in sections if section.type == "abstract"), None)
+    if abstract and first_body:
+        abstract_y = min((block.bbox["y"] for block in abstract.blocks
+                          if block.page == 1 and block.bbox and "y" in block.bbox), default=None)
+        if abstract_y is not None:
+            for block in list(first_body.blocks):
+                if (block.type == "figure" and block.page == 1 and block.bbox
+                        and block.bbox.get("y", float("inf")) + block.bbox.get("height", 0) < abstract_y):
+                    first_body.blocks.remove(block)
+                    block.beforeHeading = True
+                    abstract.blocks.insert(0, block)
+
+    for reference in model.references:
+        if reference.preview and _compact_text(reference.preview) == _compact_text(reference.title):
+            reference.preview = ""
+
+    blocks = {block.id: block for section in sections for block in section.blocks}
+    for block in blocks.values():
+        if block.type in {"figure", "table"} and block.caption:
+            block.captionContent = _numbered_citations(block.caption, model.references)
+    model.figures = [blocks.get(figure.id, figure) for figure in model.figures]
+    model.tables = [blocks.get(table.id, table) for table in model.tables]
+    _renumber_sections(sections)
+    for order, block in enumerate(block for section in sections for block in section.blocks):
+        block.order = order
+    return model
+
+
 def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, grobid: dict[str, Any] | None = None, fallback_references: list[dict[str, Any]] | None = None) -> DocumentModel:
     from docling_core.types.doc import PictureItem, TableItem
 
@@ -1277,4 +1345,4 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
     expected_count = sum(len(citation.get("referenceIds", [])) for paragraph in grobid.get("bodyParagraphs", []) for citation in paragraph.get("citations", []))
     citation_status = ("linked" if linked_count else "unresolved") if not expected_count else "linked" if linked_count >= expected_count else "partial"
     source = "docling+grobid+pdfrefs" if grobid and use_numbered_references else "docling+grobid" if grobid else "docling+pdfrefs" if fallback_references else "docling"
-    return DocumentModel(id=document_id, metadata=metadata, sections=sections, references=references, figures=figures, tables=tables, pages=page_sizes, citationLinkStatus=citation_status, source=source)
+    return finalize_document_model(DocumentModel(id=document_id, metadata=metadata, sections=sections, references=references, figures=figures, tables=tables, pages=page_sizes, citationLinkStatus=citation_status, source=source))

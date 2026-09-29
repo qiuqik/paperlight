@@ -35,6 +35,7 @@ class Block(BaseModel):
     number: int | None = None
     label: str = ""
     caption: str = ""
+    captionContent: list[InlineNode] = Field(default_factory=list)
     src: str | None = None
     beforeHeading: bool = False
     headers: list[Any] = Field(default_factory=list)

@@ -129,6 +129,26 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(client.get("/api/auth/me").status_code, 401)
         self.assertEqual(client.post("/api/auth/login", json={"username": "pinuser", "password": "0000"}).status_code, 200)
 
+    def test_existing_document_is_cleaned_on_read_without_rewriting_saved_model(self) -> None:
+        path = self.root / "users" / self.alice["id"] / "documents" / self.document_id / "document.json"
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        stored["metadata"]["authors"] = ["Alice Lee", "Bob Chen"]
+        stored["sections"] = [{"id": "intro", "title": "1 Introduction", "blocks": [
+            {"id": "authors", "type": "paragraph", "page": 1, "text": "Alice Lee, Bob Chen"},
+            {"id": "figure-1", "type": "figure", "page": 1, "caption": "See [1]."}]},
+            {"id": "intro2", "title": "2 1Introduction", "blocks": [
+                {"id": "body", "type": "paragraph", "page": 1, "text": "Main text."}]}]
+        stored["references"] = [{"id": "1", "number": 1, "title": "Full citation", "preview": "Full citation"}]
+        path.write_text(json.dumps(stored), encoding="utf-8")
+        response = self.alice_client.get(f"/api/documents/{self.document_id}")
+        self.assertEqual(response.status_code, 200)
+        document = response.json()["document"]
+        self.assertEqual(len(document["sections"]), 1)
+        self.assertEqual([block["id"] for block in document["sections"][0]["blocks"]], ["figure-1", "body"])
+        self.assertEqual(document["sections"][0]["blocks"][0]["captionContent"][1]["referenceIds"], ["1"])
+        self.assertEqual(document["references"][0]["preview"], "")
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), stored)
+
     def test_logout_and_owned_document_deletion(self) -> None:
         self.assertEqual(self.alice_client.post("/api/auth/logout").status_code, 204)
         self.assertEqual(self.alice_client.get("/api/documents").status_code, 401)

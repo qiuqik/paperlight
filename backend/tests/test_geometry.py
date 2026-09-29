@@ -8,13 +8,46 @@ from types import SimpleNamespace
 from types import ModuleType
 from unittest.mock import patch
 
-from backend.app.model import Block, Section
-from backend.app.normalizer import _block_bbox, _formula_number, _heading_key, _merge_continuations, _merge_list_item, _place_figures_before_intro, _render_picture_from_pdf, _repair_heading, _reposition_figures, extract_pdf_references, normalize_docling
+from backend.app.model import Block, DocumentModel, Metadata, Reference, Section
+from backend.app.normalizer import _block_bbox, _formula_number, _heading_key, _merge_continuations, _merge_list_item, _place_figures_before_intro, _render_picture_from_pdf, _repair_heading, _reposition_figures, extract_pdf_references, finalize_document_model, normalize_docling
 from backend.scripts.reorder_wide_figures import repair as repair_wide_figures
 from backend.scripts.repair_list_geometry import repair as repair_list_geometry
 
 
 class GeometryTests(unittest.TestCase):
+    def test_saved_model_cleanup_removes_author_roster_links_captions_and_deduplicates_references(self) -> None:
+        figure = Block(id="figure-1", type="figure", page=1, caption="Comparison with prior work [2] and [3].",
+                       bbox={"x": 30, "y": 120, "width": 460, "height": 120})
+        model = DocumentModel(id="paper", metadata=Metadata(title="Example", authors=["Alice Lee", "Bob Chen"]),
+            sections=[
+                Section(id="abstract", title="Abstract", type="abstract", blocks=[Block(id="abstract-text", type="paragraph", page=1, text="Summary", bbox={"x": 30, "y": 310, "width": 460, "height": 80})]),
+                Section(id="intro-a", title="1 Introduction", blocks=[Block(id="author-copy", type="paragraph", page=1, text="Alice Lee, Bob Chen"), figure]),
+                Section(id="intro-b", title="2 1Introduction", blocks=[Block(id="body", type="paragraph", page=1, text="Real introduction prose.")]),
+                Section(id="related", title="3 2Related Work", blocks=[Block(id="related-text", type="paragraph", page=2, text="Alice Lee and Bob Chen studied this area.")]),
+            ], references=[Reference(id="2", number=2, title="Complete entry 2001.", preview="Complete entry 2001."),
+                           Reference(id="3", number=3, title="Another entry", preview="Extra details")], figures=[figure])
+        cleaned = finalize_document_model(model)
+        self.assertEqual([section.title for section in cleaned.sections], ["Abstract", "1 Introduction", "2 Related Work"])
+        self.assertEqual([block.id for block in cleaned.sections[0].blocks], ["figure-1", "abstract-text"])
+        self.assertTrue(cleaned.sections[0].blocks[0].beforeHeading)
+        self.assertEqual([block.id for block in cleaned.sections[1].blocks], ["body"])
+        self.assertEqual(cleaned.sections[2].blocks[0].text, "Alice Lee and Bob Chen studied this area.")
+        self.assertEqual([node.referenceIds for node in cleaned.figures[0].captionContent if node.type == "citation"], [["2"], ["3"]])
+        self.assertEqual(cleaned.references[0].preview, "")
+        self.assertEqual(cleaned.references[1].preview, "Extra details")
+
+    def test_author_roster_with_existing_annotation_anchor_is_preserved(self) -> None:
+        model = DocumentModel(id="paper", metadata=Metadata(authors=["Alice Lee", "Bob Chen"]),
+                              sections=[Section(id="intro", title="Introduction", blocks=[
+                                  Block(id="marked-authors", type="paragraph", page=1, text="Alice Lee, Bob Chen")])])
+        cleaned = finalize_document_model(model, {"marked-authors"})
+        self.assertEqual(cleaned.sections[0].blocks[0].id, "marked-authors")
+
+    def test_heading_cleanup_keeps_an_unnumbered_leading_article(self) -> None:
+        model = DocumentModel(id="paper", metadata=Metadata(), sections=[
+            Section(id="study", title="A Study of Streamgraphs", blocks=[])])
+        self.assertEqual(finalize_document_model(model).sections[0].title, "1 A Study of Streamgraphs")
+
     def test_pdf_crop_falls_back_to_full_page_render_and_closes_document(self) -> None:
         class FakeImage:
             bounds = None
