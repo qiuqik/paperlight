@@ -48,6 +48,15 @@ class GeometryTests(unittest.TestCase):
             Section(id="study", title="A Study of Streamgraphs", blocks=[])])
         self.assertEqual(finalize_document_model(model).sections[0].title, "1 A Study of Streamgraphs")
 
+    def test_list_cleanup_removes_parser_bullet_from_saved_and_new_models(self) -> None:
+        model = DocumentModel(id="paper", metadata=Metadata(), sections=[
+            Section(id="intro", title="Introduction", blocks=[Block(id="findings", type="list", items=[
+                "\u2022 First finding", "\u25cf Second finding", "Third finding", "- A hyphenated item", "\u2022\u00a0Fourth finding",
+            ])])])
+        expected = ["First finding", "Second finding", "Third finding", "- A hyphenated item", "Fourth finding"]
+        self.assertEqual(finalize_document_model(model).sections[0].blocks[0].items, expected)
+        self.assertEqual(finalize_document_model(model).sections[0].blocks[0].items, expected)
+
     def test_pdf_crop_falls_back_to_full_page_render_and_closes_document(self) -> None:
         class FakeImage:
             bounds = None

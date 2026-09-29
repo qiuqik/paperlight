@@ -729,6 +729,11 @@ def _is_duplicate_author_line(text: str, authors: list[str]) -> bool:
     return bool(roster) and candidate == roster
 
 
+def _list_item_without_marker(text: str) -> str:
+    """The browser draws list markers, so omit markers included by the PDF parser."""
+    return re.sub(r"^\s*[\u2022\u25cf\u25cb\u25aa\u25e6]\s*", "", text, count=1)
+
+
 def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] | None = None) -> DocumentModel:
     """Apply layout and citation cleanup to new and previously saved models."""
     sections = model.sections
@@ -767,6 +772,8 @@ def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] 
 
     blocks = {block.id: block for section in sections for block in section.blocks}
     for block in blocks.values():
+        if block.type == "list":
+            block.items = [_list_item_without_marker(item) for item in block.items]
         if block.type in {"figure", "table"} and block.caption:
             block.captionContent = _numbered_citations(block.caption, model.references)
     model.figures = [blocks.get(figure.id, figure) for figure in model.figures]
