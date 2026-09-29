@@ -415,7 +415,7 @@ async def create_document(background_tasks: BackgroundTasks, file: UploadFile = 
                     try:
                         document = json.loads((_document_folder(existing["id"]) / "document.json").read_text(encoding="utf-8"))
                         if document.get("modelVersion") == DOCUMENT_MODEL_VERSION:
-                            status["document"] = finalize_document_model(DocumentModel(**document), _annotation_block_ids(existing["id"])).model_dump()
+                            status["document"] = finalize_document_model(DocumentModel(**document), _annotation_block_ids(existing["id"]), _document_folder(existing["id"])).model_dump()
                         else:
                             status = None
                     except (OSError, ValueError):
@@ -696,7 +696,7 @@ def get_document(document_id: str) -> ProcessingStatus:
             document = json.loads(document_path.read_text(encoding="utf-8"))
             if isinstance(document, dict):
                 document.setdefault("modelVersion", 1)
-                state["document"] = finalize_document_model(DocumentModel(**document), _annotation_block_ids(document_id)).model_dump()
+                state["document"] = finalize_document_model(DocumentModel(**document), _annotation_block_ids(document_id), _document_folder(document_id)).model_dump()
         except (OSError, json.JSONDecodeError):
             state.update(status="failed", error="Processed document data could not be read.")
     ACCOUNTS.touch_document(document_id)

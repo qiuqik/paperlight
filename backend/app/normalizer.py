@@ -742,10 +742,60 @@ def _is_prompt_section(section: Section) -> bool:
     return bool(re.match(r"^(?:You are |Your task is |You will receive |Act as )", first, re.I))
 
 
-def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] | None = None) -> DocumentModel:
+def _prompt_code_lines(block: Block, document_dir: Path | None) -> list[str]:
+    """Recover line breaks from a PDF prompt panel mislabeled as a code image."""
+    if (not document_dir or block.type != "code" or not block.page or not block.bbox
+            or not re.search(r"\b(?:You are|Your task is|You will receive|Act as)\b", block.text[:180], re.I)):
+        return []
+    pdf_path = document_dir / "original.pdf"
+    if not pdf_path.is_file():
+        return []
+    try:
+        import pypdfium2 as pdfium
+    except ImportError:
+        return []
+
+    pdf = pdfium.PdfDocument(str(pdf_path))
+    try:
+        page = pdf[block.page - 1]
+        text_page = page.get_textpage()
+        try:
+            height = page.get_size()[1]
+            box = block.bbox
+            text = text_page.get_text_bounded(
+                left=box["x"] - 1, bottom=height - box["y"] - box["height"] - 1,
+                right=box["x"] + box["width"] + 1, top=height - box["y"] + 1)
+        finally:
+            text_page.close()
+    finally:
+        pdf.close()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines if (len(lines) >= 3 and len(lines[0]) < 120
+                     and re.match(r"^(?:You are |Your task is |You will receive |Act as )", lines[1], re.I)) else []
+
+
+def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] | None = None,
+                            document_dir: Path | None = None) -> DocumentModel:
     """Apply layout and citation cleanup to new and previously saved models."""
     sections = model.sections
     protected_block_ids = protected_block_ids or set()
+    for section in list(sections):
+        if not section.blocks or section.blocks[-1].id in protected_block_ids:
+            continue
+        block = section.blocks[-1]
+        lines = _prompt_code_lines(block, document_dir)
+        if not lines:
+            continue
+        block.src = None
+        block.text = "\n".join(lines[1:])
+        if len(section.blocks) == 1:
+            section.title = lines[0]
+            section.presentation = "prompt"
+        else:
+            section.blocks.pop()
+            sections.insert(sections.index(section) + 1, Section(
+                id=f"prompt-{block.id}", title=lines[0], level=section.level,
+                type=section.type, presentation="prompt", blocks=[block]))
     index = 0
     while index + 1 < len(sections):
         current, following = sections[index:index + 2]
@@ -1363,4 +1413,4 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
     expected_count = sum(len(citation.get("referenceIds", [])) for paragraph in grobid.get("bodyParagraphs", []) for citation in paragraph.get("citations", []))
     citation_status = ("linked" if linked_count else "unresolved") if not expected_count else "linked" if linked_count >= expected_count else "partial"
     source = "docling+grobid+pdfrefs" if grobid and use_numbered_references else "docling+grobid" if grobid else "docling+pdfrefs" if fallback_references else "docling"
-    return finalize_document_model(DocumentModel(id=document_id, metadata=metadata, sections=sections, references=references, figures=figures, tables=tables, pages=page_sizes, citationLinkStatus=citation_status, source=source))
+    return finalize_document_model(DocumentModel(id=document_id, metadata=metadata, sections=sections, references=references, figures=figures, tables=tables, pages=page_sizes, citationLinkStatus=citation_status, source=source), document_dir=document_dir)

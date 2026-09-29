@@ -68,6 +68,21 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual([section.presentation for section in cleaned.sections], ["article", "prompt", "article"])
         self.assertEqual(cleaned.sections[1].blocks[0].text, instruction)
 
+    def test_prompt_code_crop_becomes_its_own_text_panel(self) -> None:
+        code = Block(id="code-panel", type="code", page=2, text="Evaluation prompt You are a grader.", src="/crop.png",
+                     bbox={"x": 20, "y": 30, "width": 300, "height": 200})
+        model = DocumentModel(id="paper", metadata=Metadata(), sections=[
+            Section(id="earlier", title="First prompt", type="appendix", blocks=[
+                Block(id="earlier-text", type="paragraph", text="You are a reviewer."), code])])
+        with patch("backend.app.normalizer._prompt_code_lines", return_value=[
+                "Evaluation prompt", "You are a grader.", "Score from 1 to 5."]):
+            cleaned = finalize_document_model(model, document_dir=Path("unused"))
+        self.assertEqual([section.title for section in cleaned.sections], ["First prompt", "Evaluation prompt"])
+        self.assertEqual([section.presentation for section in cleaned.sections], ["prompt", "prompt"])
+        self.assertEqual(cleaned.sections[1].blocks[0].text, "You are a grader.\nScore from 1 to 5.")
+        self.assertIsNone(cleaned.sections[1].blocks[0].src)
+        self.assertEqual(cleaned.sections[1].blocks[0].id, "code-panel")
+
     def test_pdf_crop_falls_back_to_full_page_render_and_closes_document(self) -> None:
         class FakeImage:
             bounds = None
