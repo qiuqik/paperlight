@@ -1,11 +1,22 @@
 'use client';
+import katex from 'katex';
 import type {Annotation, Block, DocumentModel, InlineNode, PageGeometry, Section} from '@/lib/document';
 import {isTextAnchor} from '@/lib/document';
+
+function MathExpression({latex, text, displayMode = false}: {latex?: string; text?: string; displayMode?: boolean}) {
+  if (latex) {
+    try {
+      const html = katex.renderToString(latex, {displayMode, throwOnError: true, trust: false, output: 'htmlAndMathml'});
+      return <span className="math-expression" aria-label={text || latex} dangerouslySetInnerHTML={{__html: html}} />;
+    } catch { /* Show the extracted text when the LaTeX cannot be parsed. */ }
+  }
+  return <span className="math-fallback">{text || '公式未能识别'}</span>;
+}
 
 function Inline({nodes, onReference}: {nodes: InlineNode[]; onReference: (id: string) => void}) {
   return <>{nodes.map((node, index) => {
     const label = node.display || node.text || '';
-    if (node.type === 'inlineEquation' && node.src) return <span className="embedded-equation" data-equation-number={node.number != null ? `(${node.number})` : undefined} key={index}><img src={node.src} alt="原 PDF 公式" draggable={false} /></span>;
+    if (node.type === 'inlineEquation') return <span className="embedded-equation" key={index}><MathExpression latex={node.latex} text={node.text || node.display} />{node.number != null && <span className="equation-number">({node.number})</span>}</span>;
     if (node.type === 'citation') return <button className="inline-link" key={index} onClick={() => node.referenceIds?.[0] && onReference(node.referenceIds[0])}>{label}</button>;
     if (node.type === 'figureLink' || node.type === 'tableLink') return <button className="inline-link" key={index} onClick={() => document.getElementById(node.figureId || node.tableId || '')?.scrollIntoView({behavior: 'smooth'})}>{label}</button>;
     if (node.type === 'link' && /^https?:\/\//.test(node.href || '')) return <a key={index} href={node.href} target="_blank" rel="noreferrer">{label}</a>;
@@ -50,10 +61,10 @@ function AreaImage({block, annotations, pages, alt, className}: {block: Block; a
 function BlockView({block, annotations, pages, onReference, prompt = false}: {block: Block; annotations: Annotation[]; pages: PageGeometry[]; onReference: (id: string) => void; prompt?: boolean}) {
   const common = {'data-block-id': block.id, 'data-page': block.page};
   switch (block.type) {
-    case 'paragraph': return <p {...common} className={`area-target${prompt && /^(?:[A-Z][A-Z\s()&-]{5,}|Step \d+\s*[—–-])/.test(block.text || '') ? ' prompt-label' : ''}`}>{block.src ? <><AreaImage block={block} annotations={annotations} pages={pages} className="formula-crop" alt="原 PDF 段落" /><span className="sr-only">{block.text}</span></> : block.content?.length ? <Inline nodes={block.content} onReference={onReference} /> : <PlainText text={block.text || ''} onReference={onReference} />}<AreaMarks block={block} annotations={annotations} pages={pages} /></p>;
+    case 'paragraph': return <p {...common} className={`area-target${prompt && /^(?:[A-Z][A-Z\s()&-]{5,}|Step \d+\s*[—–-])/.test(block.text || '') ? ' prompt-label' : ''}`}>{block.content?.length ? <Inline nodes={block.content} onReference={onReference} /> : <PlainText text={block.text || ''} onReference={onReference} />}<AreaMarks block={block} annotations={annotations} pages={pages} /></p>;
     case 'figure': return <figure {...common} id={block.id} className="paper-figure area-target" onDragStart={event => event.preventDefault()}>{block.src && <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || block.label || '论文插图'} />}<AreaMarks block={block} annotations={annotations} pages={pages} /><figcaption><strong>{block.label || `Figure ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption></figure>;
     case 'table': return <figure {...common} id={block.id} className="paper-figure area-target" onDragStart={event => event.preventDefault()}><figcaption><strong>{block.label || `Table ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption>{block.src ? <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || '论文表格'} /> : <div className="table-scroll"><table><thead><tr>{(block.headers || []).map((cell, index) => <th key={index}>{typeof cell === 'string' ? cell : cell.text}</th>)}</tr></thead><tbody>{(block.rows || []).map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex}>{typeof cell === 'string' ? cell : cell.text}</td>)}</tr>)}</tbody></table></div>}<AreaMarks block={block} annotations={annotations} pages={pages} /></figure>;
-    case 'equation': return <figure {...common} className={`paper-equation area-target${block.number != null ? ' numbered-equation' : ''}`} onDragStart={event => event.preventDefault()}>{block.src ? <AreaImage block={block} annotations={annotations} pages={pages} alt={block.text || '原 PDF 公式'} /> : <code>{block.text}</code>}{block.number != null && <span className="equation-number" aria-label={`公式编号 ${block.number}`}>({block.number})</span>}<AreaMarks block={block} annotations={annotations} pages={pages} /></figure>;
+    case 'equation': return <figure {...common} className={`paper-equation area-target${block.number != null ? ' numbered-equation' : ''}`}><MathExpression latex={block.latex} text={block.text} displayMode />{block.number != null && <span className="equation-number" aria-label={`公式编号 ${block.number}`}>({block.number})</span>}<AreaMarks block={block} annotations={annotations} pages={pages} /></figure>;
     case 'list': return <div {...common} className="area-target"><ul>{(block.items || []).map((item, index) => <li key={index}>{item}</li>)}</ul><AreaMarks block={block} annotations={annotations} pages={pages} /></div>;
     case 'quote': return <blockquote {...common} className="area-target">{block.text}<AreaMarks block={block} annotations={annotations} pages={pages} /></blockquote>;
     case 'code': return block.src ? <figure {...common} className="area-target"><AreaImage block={block} annotations={annotations} pages={pages} alt={block.text || '代码'} /><AreaMarks block={block} annotations={annotations} pages={pages} /></figure> : <pre {...common} className="area-target">{block.text}<AreaMarks block={block} annotations={annotations} pages={pages} /></pre>;

@@ -19,6 +19,7 @@ class InlineNode(BaseModel):
     tableId: str | None = None
     unresolved: bool = False
     src: str | None = None
+    latex: str = ""
     number: int | None = None
 
 
@@ -26,6 +27,7 @@ class Block(BaseModel):
     id: str
     type: Literal["paragraph", "heading", "figure", "table", "equation", "list", "quote", "footnote", "requirement", "code"]
     text: str = ""
+    latex: str = ""
     content: list[InlineNode] = Field(default_factory=list)
     level: int | None = None
     page: int | None = None

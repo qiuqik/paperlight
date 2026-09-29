@@ -9,7 +9,7 @@ from types import ModuleType
 from unittest.mock import patch
 
 from backend.app.model import Block, DocumentModel, Metadata, Reference, Section
-from backend.app.normalizer import _block_bbox, _formula_number, _heading_key, _merge_continuations, _merge_list_item, _place_figures_before_intro, _render_picture_from_pdf, _repair_heading, _reposition_figures, extract_pdf_references, finalize_document_model, normalize_docling
+from backend.app.normalizer import _block_bbox, _formula_number, _formula_without_number, _heading_key, _merge_continuations, _merge_list_item, _place_figures_before_intro, _render_picture_from_pdf, _repair_heading, _reposition_figures, _usable_formula_latex, extract_pdf_references, finalize_document_model, normalize_docling
 from backend.scripts.reorder_wide_figures import repair as repair_wide_figures
 from backend.scripts.repair_list_geometry import repair as repair_list_geometry
 
@@ -82,6 +82,20 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(cleaned.sections[1].blocks[0].text, "You are a grader.\nScore from 1 to 5.")
         self.assertIsNone(cleaned.sections[1].blocks[0].src)
         self.assertEqual(cleaned.sections[1].blocks[0].id, "code-panel")
+
+    def test_equations_use_text_and_reject_hallucinated_latex(self) -> None:
+        self.assertEqual(_formula_without_number("bucketidx = arg min i |ar-ari| (3)", 3),
+                         "bucketidx = arg min i |ar-ari|")
+        self.assertEqual(_usable_formula_latex(r"x_i = 2", "xi = 2"), "")
+        self.assertEqual(_usable_formula_latex(r"x_i = \\frac{2}{3}", "xi = 2"), "")
+        self.assertEqual(_usable_formula_latex(r"\alpha + \beta", "α + β"), r"\alpha + \beta")
+        model = DocumentModel(id="paper", metadata=Metadata(), sections=[Section(id="body", title="Method", blocks=[
+            Block(id="equation", type="equation", text="a = b (3)", number=3, src="/crop.png"),
+            Block(id="paragraph", type="paragraph", text="The result is a + b.", src="/paragraph-crop.png")])])
+        cleaned = finalize_document_model(model)
+        self.assertEqual(cleaned.sections[0].blocks[0].text, "a = b")
+        self.assertIsNone(cleaned.sections[0].blocks[0].src)
+        self.assertIsNone(cleaned.sections[0].blocks[1].src)
 
     def test_pdf_crop_falls_back_to_full_page_render_and_closes_document(self) -> None:
         class FakeImage:
@@ -349,7 +363,8 @@ class GeometryTests(unittest.TestCase):
         appendix = next(section for section in model.sections if section.type == "appendix")
         self.assertEqual([block.type for block in appendix.blocks], ["paragraph", "equation"])
         self.assertEqual(appendix.blocks[0].text, "Additional results.")
-        self.assertTrue(appendix.blocks[1].src.endswith(".png"))
+        self.assertIsNone(appendix.blocks[1].src)
+        self.assertEqual(appendix.blocks[1].text, "公式未能识别")
 
     def test_lettered_appendix_after_references_is_retained(self) -> None:
         def item(label: str, text: str, page: int):

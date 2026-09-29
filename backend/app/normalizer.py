@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import json
 import unicodedata
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -734,6 +735,88 @@ def _list_item_without_marker(text: str) -> str:
     return re.sub(r"^\s*[\u2022\u25cf\u25cb\u25aa\u25e6]\s*", "", text, count=1)
 
 
+def _formula_without_number(text: str, number: int | None) -> str:
+    value = clean_text(text)
+    if number is not None:
+        value = re.sub(rf"\s*[,.;]?\s*\({number}\)\s*$", "", value)
+    return value.strip()
+
+
+def _usable_formula_latex(candidate: str, source: str) -> str:
+    """Reject OCR math that adds numbers or visibly fragmented commands."""
+    value = candidate.strip().strip("$").strip()
+    if not value or "\\" not in value or "�" in value or value.count("{") != value.count("}"):
+        return ""
+    if re.search(r"\\\s+[A-Za-z](?:\s+[A-Za-z]){2,}", value):
+        return ""
+    source_numbers = re.findall(r"\d+", source)
+    for number in re.findall(r"\d+", value):
+        if number not in source_numbers:
+            return ""
+        source_numbers.remove(number)
+    return value
+
+
+def _recover_pdf_formula(block: Block, pdf_document: Any) -> str:
+    if not pdf_document or not block.page or not block.bbox:
+        return ""
+    try:
+        page = pdf_document[block.page - 1]
+        text_page = page.get_textpage()
+        try:
+            height = page.get_size()[1]
+            box = block.bbox
+            source = text_page.get_text_bounded(
+                left=box["x"] - 2, bottom=height - box["y"] - box["height"] - 2,
+                right=box["x"] + box["width"] + 2, top=height - box["y"] + 2)
+            return _formula_without_number(source, block.number)
+        finally:
+            text_page.close()
+    except (IndexError, KeyError, OSError, ValueError):
+        return ""
+
+
+def _recover_inline_formulas(model: DocumentModel, document_dir: Path | None) -> None:
+    if not document_dir or not any(node.type == "inlineEquation" and not node.text for section in model.sections
+                                   for block in section.blocks for node in block.content):
+        return
+    snapshot = document_dir / "docling.json"
+    if not snapshot.is_file():
+        return
+    try:
+        source = json.loads(snapshot.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    page_heights = {int(page["number"]): page["height"] for page in model.pages if "number" in page and "height" in page}
+    candidates: list[tuple[int, float, float, float, float, str]] = []
+    for item in source.get("texts", []):
+        if item.get("label") not in {"formula", "display_formula"} or not item.get("prov"):
+            continue
+        location = item["prov"][0]
+        page = int(location.get("page_no", 0))
+        box = location.get("bbox") or {}
+        if page not in page_heights or not all(key in box for key in ("l", "r", "t", "b")):
+            continue
+        formula = _formula_without_number(item.get("orig") or item.get("text") or "", None)
+        formula = re.sub(r"\s*\(\d{1,3}\)\s*$", "", formula).strip()
+        if formula:
+            top = page_heights[page] - float(box["t"]) if box.get("coord_origin") == "BOTTOMLEFT" else float(box["t"])
+            bottom = page_heights[page] - float(box["b"]) if box.get("coord_origin") == "BOTTOMLEFT" else float(box["b"])
+            candidates.append((page, float(box["l"]), top, float(box["r"]), bottom, formula))
+    for section in model.sections:
+        for block in section.blocks:
+            nodes = [node for node in block.content if node.type == "inlineEquation" and not node.text]
+            if not nodes or not block.bbox or not block.page:
+                continue
+            left, top = block.bbox["x"], block.bbox["y"]
+            right, bottom = left + block.bbox["width"], top + block.bbox["height"]
+            matches = [entry for entry in candidates if entry[0] == block.page and entry[1] <= right + 8
+                       and entry[3] >= left - 8 and entry[2] <= bottom + 8 and entry[4] >= top - 8]
+            for node, entry in zip(nodes, sorted(matches, key=lambda match: (match[2], match[1]))):
+                node.text = entry[5]
+                node.src = None
+
+
 def _is_prompt_section(section: Section) -> bool:
     """Recognize an instruction panel that PDF extraction split into ordinary paragraphs."""
     if section.type == "abstract":
@@ -829,12 +912,32 @@ def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] 
             reference.preview = ""
 
     blocks = {block.id: block for section in sections for block in section.blocks}
+    if document_dir and any(block.type == "equation" and not block.text for block in blocks.values()):
+        pdf_path = document_dir / "original.pdf"
+        if pdf_path.is_file():
+            try:
+                import pypdfium2 as pdfium
+                pdf_document = pdfium.PdfDocument(str(pdf_path))
+                try:
+                    for block in blocks.values():
+                        if block.type == "equation" and not block.text:
+                            block.text = _recover_pdf_formula(block, pdf_document)
+                finally:
+                    pdf_document.close()
+            except (ImportError, OSError, ValueError):
+                pass
+    _recover_inline_formulas(model, document_dir)
     for section in sections:
         if _is_prompt_section(section):
             section.presentation = "prompt"
     for block in blocks.values():
         if block.type == "list":
             block.items = [_list_item_without_marker(item) for item in block.items]
+        if block.type == "paragraph" and block.src and (block.text or block.content):
+            block.src = None
+        if block.type == "equation":
+            block.text = _formula_without_number(block.text, block.number) or "公式未能识别"
+            block.src = None
         if block.type in {"figure", "table"} and block.caption:
             block.captionContent = _numbered_citations(block.caption, model.references)
     model.figures = [blocks.get(figure.id, figure) for figure in model.figures]
@@ -1268,13 +1371,11 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             continue
         if label in {"formula", "display_formula"}:
             equation_id = f"equation-{len(sections)}-{len(current.blocks) if current else 0}"
-            asset_path = document_dir / "assets" / f"{equation_id}.png"
-            asset_path.parent.mkdir(parents=True, exist_ok=True)
-            equation_src = f"/api/documents/{document_id}/assets/{asset_path.name}" if _render_picture_from_pdf(document_dir / "original.pdf", item, asset_path, margin=2) else None
-            if not text and not equation_src:
-                continue
-            block = Block(id=equation_id, type="equation", text=text, page=_page_no(item), src=equation_src,
-                          number=_formula_number(location, pdf_document))
+            number = _formula_number(location, pdf_document)
+            original_formula = _formula_without_number(getattr(item, "orig", "") or text, number)
+            latex = _usable_formula_latex(text, original_formula)
+            block = Block(id=equation_id, type="equation", text=original_formula or "公式未能识别", latex=latex,
+                          page=_page_no(item), number=number)
         elif label == "code":
             code_id = f"code-{len(sections)}-{len(current.blocks) if current else 0}"
             asset_path = document_dir / "assets" / f"{code_id}.png"
@@ -1305,11 +1406,6 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             block_type = "requirement" if re.match(r"^(?:R\d+|DR\d+)\s*[:.:—-]", text, re.I) else "quote" if label == "quote" else "paragraph"
             block = Block(id=f"block-{len(sections)}-{len(current.blocks)}", type=block_type, text=text, page=_page_no(item))
             if block_type == "paragraph":
-                if location and getattr(location, "bbox", None) and re.search(r"∑|∏|∫|√|∂|∞|\bP[−-]\d", text) and len(text) < 1800:
-                    math_path = document_dir / "assets" / f"{block.id}-math.png"
-                    math_path.parent.mkdir(parents=True, exist_ok=True)
-                    if _render_picture_from_pdf(document_dir / "original.pdf", item, math_path, margin=2):
-                        block.src = f"/api/documents/{document_id}/assets/{math_path.name}"
                 block.content = _numbered_citations(text, references) if use_numbered_references else _match_citations(text, grobid_body, references) if grobid_body else _numbered_citations(text, references)
                 if location and getattr(location, "bbox", None):
                     box = location.bbox

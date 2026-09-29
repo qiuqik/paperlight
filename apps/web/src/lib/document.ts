@@ -1,7 +1,7 @@
 export type Box = {x: number; y: number; width: number; height: number};
-export type InlineNode = {type: string; text?: string; display?: string; bold?: boolean; italic?: boolean; referenceIds?: string[]; href?: string; figureId?: string; tableId?: string; src?: string; number?: number};
+export type InlineNode = {type: string; text?: string; display?: string; latex?: string; bold?: boolean; italic?: boolean; referenceIds?: string[]; href?: string; figureId?: string; tableId?: string; src?: string; number?: number};
 export type Block = {
-  id: string; type: string; text?: string; content?: InlineNode[]; page?: number; bbox?: Box; order?: number;
+  id: string; type: string; text?: string; latex?: string; content?: InlineNode[]; page?: number; bbox?: Box; order?: number;
   items?: string[]; number?: number; label?: string; caption?: string; src?: string;
   captionContent?: InlineNode[];
   beforeHeading?: boolean;

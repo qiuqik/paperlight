@@ -785,17 +785,31 @@ def _process_document(document_id: str, filename: str) -> None:
 
         _set_job(document_id, stage="extracting_structure", progress=0.15)
         docling_started = time.perf_counter()
-        options = PdfPipelineOptions(do_ocr=False, do_table_structure=True, generate_picture_images=True, images_scale=2.0)
-        converter = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)})
-        result = converter.convert(str(pdf_path))
+        formula_enabled = os.environ.get("PAPERLIGHT_FORMULA_MODE", "on").lower() != "off"
+
+        def convert_with_options(options: PdfPipelineOptions):
+            converter = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)})
+            try:
+                return converter.convert(str(pdf_path))
+            except Exception:
+                if not options.do_formula_enrichment:
+                    raise
+                logger.exception("Formula recognition failed for %s; retrying text extraction", document_id)
+                options.do_formula_enrichment = False
+                converter = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)})
+                return converter.convert(str(pdf_path))
+
+        options = PdfPipelineOptions(do_ocr=False, do_table_structure=True, generate_picture_images=True,
+                                     images_scale=2.0, do_formula_enrichment=formula_enabled)
+        result = convert_with_options(options)
         docling_doc = result.document
         ocr_mode = os.environ.get("PAPERLIGHT_OCR_MODE", "auto").lower()
         use_ocr = ocr_mode == "always" or (ocr_mode == "auto" and _needs_ocr(docling_doc))
         if use_ocr and not options.do_ocr:
             _set_job(document_id, stage="recognizing_scanned_pages", progress=0.48)
-            ocr_options = PdfPipelineOptions(do_ocr=True, do_table_structure=True, generate_picture_images=True, images_scale=2.0)
-            converter = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=ocr_options)})
-            result = converter.convert(str(pdf_path))
+            ocr_options = PdfPipelineOptions(do_ocr=True, do_table_structure=True, generate_picture_images=True,
+                                             images_scale=2.0, do_formula_enrichment=formula_enabled)
+            result = convert_with_options(ocr_options)
             docling_doc = result.document
         (folder / "docling.json").write_text(json.dumps(docling_doc.export_to_dict(), ensure_ascii=False, default=str), encoding="utf-8")
         timings["doclingSeconds"] = round(time.perf_counter() - docling_started, 2)
