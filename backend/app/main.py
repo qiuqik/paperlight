@@ -391,6 +391,7 @@ async def create_document(background_tasks: BackgroundTasks, file: UploadFile = 
         shutil.rmtree(folder, ignore_errors=True)
         raise HTTPException(status_code=400, detail="Uploaded PDF is empty.")
     fingerprint = digest.hexdigest()
+    requested_parser = os.environ.get("PAPERLIGHT_PDF_PARSER", "docling").lower()
     with import_lock:
         existing = ACCOUNTS.find_document(user["id"], fingerprint)
         if existing:
@@ -399,19 +400,23 @@ async def create_document(background_tasks: BackgroundTasks, file: UploadFile = 
                 if status["status"] == "ready":
                     try:
                         document = json.loads((_document_folder(existing["id"]) / "document.json").read_text(encoding="utf-8"))
-                        if document.get("modelVersion") == DOCUMENT_MODEL_VERSION:
+                        same_parser = (document.get("source") == "mineru_basic") if requested_parser == "mineru" else str(document.get("source", "")).startswith("docling")
+                        if document.get("modelVersion") == DOCUMENT_MODEL_VERSION and same_parser:
                             status["document"] = finalize_document_model(DocumentModel(**document), _annotation_block_ids(existing["id"]), _document_folder(existing["id"])).model_dump()
                         else:
                             status = None
                     except (OSError, ValueError):
                         status = None
+                elif status.get("requestedParser") != requested_parser:
+                    status = None
                 if status:
                     shutil.rmtree(folder, ignore_errors=True)
                     return ProcessingStatus(**status)
         ACCOUNTS.add_document(document_id, user["id"], fingerprint, filename,
                               f"users/{user['id']}/documents/{document_id}")
         _set_job(document_id, documentId=document_id, status="processing", stage="queued", progress=0.02,
-                 filename=filename, createdAt=time.time(), fingerprint=fingerprint, sourceKind="pdf_upload")
+                 filename=filename, createdAt=time.time(), fingerprint=fingerprint, sourceKind="pdf_upload",
+                 requestedParser=requested_parser)
     background_tasks.add_task(_process_document, document_id, filename)
     return ProcessingStatus(documentId=document_id, status="processing", stage="queued", progress=0.02)
 
@@ -823,12 +828,12 @@ def _process_document(document_id: str, filename: str) -> None:
                 (folder / "original.pdf").write_bytes(pdf)
                 parsed = parse_pdf(folder / "original.pdf", document_id, filename, folder, GROBID_URL,
                                    lambda stage, progress: _set_job(document_id, stage=stage, progress=progress))
-                model, parse_source = parsed.model, "arxiv_pdf"
+                model, parse_source = parsed.model, parsed.model.source
                 timings.update(parsed.timings)
         else:
             parsed = parse_pdf(folder / "original.pdf", document_id, filename, folder, GROBID_URL,
                                lambda stage, progress: _set_job(document_id, stage=stage, progress=progress))
-            model, parse_source = parsed.model, "pdf_upload"
+            model, parse_source = parsed.model, parsed.model.source
             timings.update(parsed.timings)
         model.fingerprint = str(state.get("fingerprint", ""))
         model.source = parse_source
