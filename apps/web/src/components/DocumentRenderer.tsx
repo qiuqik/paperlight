@@ -5,22 +5,30 @@ import katex from 'katex';
 import type {Annotation, Block, DocumentModel, InlineNode, PageGeometry, Section} from '@/lib/document';
 import {isTextAnchor} from '@/lib/document';
 
-function MathExpression({latex, mathml, text, src, displayMode = false, preferOriginal = false}: {latex?: string; mathml?: string; text?: string; src?: string; displayMode?: boolean; preferOriginal?: boolean}) {
-  if (src) return <img className={displayMode ? 'formula-crop' : 'inline-formula-crop'} src={src} alt={text || '原 PDF 公式'} />;
-  if (latex && !preferOriginal) {
-    try {
-      const html = katex.renderToString(latex, {displayMode, throwOnError: true, trust: false, output: 'htmlAndMathml'});
-      return <span className="math-expression" aria-label={text || latex} dangerouslySetInnerHTML={{__html: html}} />;
-    } catch { /* Show the extracted text when the LaTeX cannot be parsed. */ }
+function renderedLatex(latex: string, displayMode: boolean) {
+  let expression = latex.trim();
+  if (expression.startsWith('\\(') && expression.endsWith('\\)')) expression = expression.slice(2, -2).trim();
+  else if (expression.startsWith('\\[') && expression.endsWith('\\]')) expression = expression.slice(2, -2).trim();
+  else if (expression.startsWith('$$') && expression.endsWith('$$')) expression = expression.slice(2, -2).trim();
+  else if (expression.startsWith('$') && expression.endsWith('$')) expression = expression.slice(1, -1).trim();
+  try { return katex.renderToString(expression, {displayMode, throwOnError: true, trust: false, output: 'htmlAndMathml'}); }
+  catch { return undefined; }
+}
+
+function MathExpression({latex, mathml, text, src, displayMode = false}: {latex?: string; mathml?: string; text?: string; src?: string; displayMode?: boolean}) {
+  if (latex) {
+    const html = renderedLatex(latex, displayMode);
+    if (html) return <span className="math-expression" aria-label={text || latex} dangerouslySetInnerHTML={{__html: html}} />;
   }
   if (mathml) return <span className="math-expression" aria-label={text || latex} dangerouslySetInnerHTML={{__html: mathml}} />;
+  if (src) return <img className={displayMode ? 'formula-crop' : 'inline-formula-crop'} src={src} alt={text || '原 PDF 公式'} />;
   return <span className="math-fallback">{text || '公式未能识别'}</span>;
 }
 
 function InlineFormula({node, pdfUrl}: {node: InlineNode; pdfUrl?: string}) {
-  const [showLatex, setShowLatex] = useState(false);
-  const expression = <MathExpression latex={node.latex} mathml={node.mathml} src={showLatex ? undefined : node.src} text={node.text || node.display} preferOriginal={!showLatex && !!pdfUrl} />;
-  return <span className="embedded-equation">{node.src && !showLatex ? <ZoomableImage src={node.src} label="行内公式" className="inline-image-open">{expression}</ZoomableImage> : expression}{node.src && node.latex && <button className="formula-original" type="button" title="模型转写可能有误，请与原 PDF 核对" onClick={() => setShowLatex(value => !value)}>{showLatex ? '原图' : 'LaTeX 转写'}</button>}{pdfUrl && <a className="formula-original" href={pdfUrl} target="_blank" rel="noreferrer" title="查看原 PDF 中的公式">原文</a>}{node.number != null && <span className="equation-number">({node.number})</span>}</span>;
+  const hasRenderedMath = !!(node.latex && renderedLatex(node.latex, false) || node.mathml);
+  const expression = <MathExpression latex={node.latex} mathml={node.mathml} src={node.src} text={node.text || node.display} />;
+  return <span className="embedded-equation">{node.src && !hasRenderedMath ? <ZoomableImage src={node.src} label="行内公式" className="inline-image-open">{expression}</ZoomableImage> : expression}{pdfUrl && <a className="formula-original" href={pdfUrl} target="_blank" rel="noreferrer" title="核对原 PDF 中的公式">原文</a>}{node.number != null && <span className="equation-number">({node.number})</span>}</span>;
 }
 
 function Inline({nodes, onReference, pdfUrl}: {nodes: InlineNode[]; onReference: (id: string) => void; pdfUrl?: string}) {
@@ -104,6 +112,7 @@ function EquationBlock({block, annotations, pages, pdfUrl, documentId}: {block: 
   const [draft, setDraft] = useState(block.latex || '');
   const [editing, setEditing] = useState(false);
   const [message, setMessage] = useState('');
+  useEffect(() => { setLatex(block.latex || ''); }, [block.latex]);
   const save = async () => {
     try {
       const response = await fetch(`/api/parser/api/documents/${encodeURIComponent(documentId)}/formulas/${encodeURIComponent(block.id)}`, {
@@ -112,11 +121,11 @@ function EquationBlock({block, annotations, pages, pdfUrl, documentId}: {block: 
       if (!response.ok) throw new Error(`保存失败 (${response.status})`);
       setLatex(draft.trim());
       setEditing(false);
-      setMessage('转写已保存；阅读视图仍显示原 PDF 公式。');
+      setMessage('转写已保存。');
     } catch (error) {setMessage(error instanceof Error ? error.message : '保存失败');}
   };
   return <figure data-block-id={block.id} data-page={block.page} className={`paper-equation area-target${block.number != null ? ' numbered-equation' : ''}`}>
-    {block.src ? <ZoomableImage src={block.src} label={`公式${block.number ? ` ${block.number}` : ''}`} className="formula-image-open"><MathExpression latex={latex} mathml={block.mathml} src={block.src} text={block.text} displayMode preferOriginal={!!pdfUrl} /></ZoomableImage> : <MathExpression latex={latex} mathml={block.mathml} text={block.text} displayMode preferOriginal={!!pdfUrl} />}
+    {block.src && !((latex && renderedLatex(latex, true)) || block.mathml) ? <ZoomableImage src={block.src} label={`公式${block.number ? ` ${block.number}` : ''}`} className="formula-image-open"><MathExpression latex={latex} mathml={block.mathml} src={block.src} text={block.text} displayMode /></ZoomableImage> : <MathExpression latex={latex} mathml={block.mathml} src={block.src} text={block.text} displayMode />}
     {pdfUrl && <a className="formula-original" href={`${pdfUrl}#page=${block.page || 1}`} target="_blank" rel="noreferrer">查看原文</a>}
     {latex && <button className="formula-copy" type="button" title={pdfUrl ? '辅助转写，可能与原公式不一致' : '原始 TeX'} onClick={() => void navigator.clipboard.writeText(latex)}>复制 TeX</button>}
     {pdfUrl && <button className="formula-copy" type="button" onClick={() => {setDraft(latex); setEditing(value => !value); setMessage('');}}>修订转写</button>}
@@ -152,7 +161,7 @@ function SectionView({section, annotations, pages, onReference, pdfUrl, document
 export default function DocumentRenderer({document: paper, annotations, onReference}: {document: DocumentModel; annotations: Annotation[]; onReference: (id: string) => void}) {
   const pdfUrl = paper.source && paper.source !== 'arxiv_html' ? `/api/parser/api/documents/${paper.id}/original.pdf` : undefined;
   return <>
-    <header className="paper-header"><div className="eyebrow">{paper.arxivId ? `ARXIV · ${paper.arxivId}v${paper.arxivVersion} · ${paper.source === 'arxiv_html' ? '官方 HTML' : 'PDF 原文'}` : `PAPERLIGHT · ${paper.metadata.pageCount || '—'} PAGES`}</div><h1>{paper.metadata.title}</h1><p className="authors">{paper.metadata.authors.join(' · ')}</p>{(paper.metadata.affiliations?.length || paper.metadata.authorNotes?.length) ? <details className="paper-author-details"><summary>作者信息</summary>{paper.metadata.affiliations?.map((value, index) => <p key={`affiliation-${index}`}>{value}</p>)}{paper.metadata.authorNotes?.map((value, index) => <p key={`note-${index}`}>{value}</p>)}</details> : null}{paper.metadata.venue && <p className="venue">{paper.metadata.venue} {paper.metadata.year || ''}</p>}{paper.fallbackReason && <p className="source-notice">官方 HTML 不完整，已使用固定版本的 PDF。</p>}</header>
+    <header className="paper-header"><div className="eyebrow">{paper.arxivId ? `ARXIV · ${paper.arxivId}v${paper.arxivVersion} · ${paper.source === 'arxiv_html' ? '官方 HTML' : 'PDF 原文'}` : `PAPERLIGHT · ${paper.metadata.pageCount || '—'} PAGES`}</div><h1>{paper.metadata.title}</h1><div className="paper-authors"><p className="authors">{paper.metadata.authors.join(' · ')}</p>{paper.metadata.affiliations?.map((value, index) => <p className="author-detail" key={`affiliation-${index}`}>{value}</p>)}{paper.metadata.authorNotes?.map((value, index) => <p className="author-detail" key={`note-${index}`}>{value}</p>)}</div>{paper.metadata.venue && <p className="venue">{paper.metadata.venue} {paper.metadata.year || ''}</p>}{paper.fallbackReason && <p className="source-notice">官方 HTML 不完整，已使用固定版本的 PDF。</p>}</header>
     {paper.sections.map(section => <SectionView key={section.id} section={section} annotations={annotations} pages={paper.pages || []} onReference={onReference} pdfUrl={pdfUrl} documentId={paper.id} arxivHtml={paper.source === 'arxiv_html'} />)}
   </>;
 }

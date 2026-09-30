@@ -18,6 +18,11 @@ class PdfRepairTests(unittest.TestCase):
                          ['Shifu Chen', 'Xiaodan Miao', 'Dazhen Deng'])
         self.assertEqual(_names('Kaiming He\nXiangyu Zhang\nMicrosoft Research\n{kahe}@microsoft.com'),
                          ['Kaiming He', 'Xiangyu Zhang'])
+        self.assertEqual(_names('Alec Radford * 1 Jong Wook Kim * 1 Chris Hallacy 1 Aditya Ramesh 1'),
+                         ['Alec Radford', 'Jong Wook Kim', 'Chris Hallacy', 'Aditya Ramesh'])
+        self.assertEqual(_names('Vlad-Constantin Lungu-Stan, Ionut¸ Mironic˘a, Mariana-Iuliana Georgescu'),
+                         ['Vlad-Constantin Lungu-Stan', 'Ionut Mironica', 'Mariana-Iuliana Georgescu'])
+        self.assertEqual(_names('Alice Lee'), ['Alice Lee'])
 
     def test_first_page_repairs_author_and_moves_email(self):
         import pymupdf
