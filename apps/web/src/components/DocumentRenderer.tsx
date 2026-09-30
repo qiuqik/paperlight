@@ -25,16 +25,16 @@ function MathExpression({latex, mathml, text, src, displayMode = false}: {latex?
   return <span className="math-fallback">{text || '公式未能识别'}</span>;
 }
 
-function InlineFormula({node, pdfUrl}: {node: InlineNode; pdfUrl?: string}) {
+function InlineFormula({node}: {node: InlineNode}) {
   const hasRenderedMath = !!(node.latex && renderedLatex(node.latex, false) || node.mathml);
   const expression = <MathExpression latex={node.latex} mathml={node.mathml} src={node.src} text={node.text || node.display} />;
-  return <span className="embedded-equation">{node.src && !hasRenderedMath ? <ZoomableImage src={node.src} label="行内公式" className="inline-image-open">{expression}</ZoomableImage> : expression}{pdfUrl && <a className="formula-original" href={pdfUrl} target="_blank" rel="noreferrer" title="核对原 PDF 中的公式">原文</a>}{node.number != null && <span className="equation-number">({node.number})</span>}</span>;
+  return <span className="embedded-equation">{node.src && !hasRenderedMath ? <ZoomableImage src={node.src} label="行内公式" className="inline-image-open">{expression}</ZoomableImage> : expression}{node.number != null && <span className="equation-number">({node.number})</span>}</span>;
 }
 
-function Inline({nodes, onReference, pdfUrl}: {nodes: InlineNode[]; onReference: (id: string) => void; pdfUrl?: string}) {
+function Inline({nodes, onReference}: {nodes: InlineNode[]; onReference: (id: string) => void}) {
   return <>{nodes.map((node, index) => {
     const label = node.display || node.text || '';
-    if (node.type === 'inlineEquation') return <InlineFormula node={node} pdfUrl={pdfUrl} key={index} />;
+    if (node.type === 'inlineEquation') return <InlineFormula node={node} key={index} />;
     if (node.type === 'citation') return <button className="inline-link" key={index} onClick={() => node.referenceIds?.[0] && onReference(node.referenceIds[0])}>{label}</button>;
     if (node.type === 'figureLink' || node.type === 'tableLink') return <button className="inline-link" key={index} onClick={() => document.getElementById(node.figureId || node.tableId || '')?.scrollIntoView({behavior: 'smooth'})}>{label}</button>;
     if (node.type === 'link' && /^https?:\/\//.test(node.href || '')) return <a key={index} href={node.href} target="_blank" rel="noreferrer">{label}</a>;
@@ -107,43 +107,23 @@ function TableGrid({block, onReference}: {block: Block; onReference: (id: string
   })}</tr>);
   return <div className="table-scroll scholarly-table-scroll"><table className="scholarly-table">{block.tableRows.some(row => row.group === 'head') && <thead>{renderRows('head')}</thead>}<tbody>{renderRows('body')}</tbody>{block.tableRows.some(row => row.group === 'foot') && <tfoot>{renderRows('foot')}</tfoot>}</table></div>;
 }
-function EquationBlock({block, annotations, pages, pdfUrl, documentId}: {block: Block; annotations: Annotation[]; pages: PageGeometry[]; pdfUrl?: string; documentId: string}) {
-  const [latex, setLatex] = useState(block.latex || '');
-  const [draft, setDraft] = useState(block.latex || '');
-  const [editing, setEditing] = useState(false);
-  const [message, setMessage] = useState('');
-  useEffect(() => { setLatex(block.latex || ''); }, [block.latex]);
-  const save = async () => {
-    try {
-      const response = await fetch(`/api/parser/api/documents/${encodeURIComponent(documentId)}/formulas/${encodeURIComponent(block.id)}`, {
-        method: 'PATCH', headers: {'content-type': 'application/json'}, body: JSON.stringify({revised: draft}),
-      });
-      if (!response.ok) throw new Error(`保存失败 (${response.status})`);
-      setLatex(draft.trim());
-      setEditing(false);
-      setMessage('转写已保存。');
-    } catch (error) {setMessage(error instanceof Error ? error.message : '保存失败');}
-  };
+function EquationBlock({block, annotations, pages}: {block: Block; annotations: Annotation[]; pages: PageGeometry[]}) {
+  const latex = block.latex || '';
   return <figure data-block-id={block.id} data-page={block.page} className={`paper-equation area-target${block.number != null ? ' numbered-equation' : ''}`}>
     {block.src && !((latex && renderedLatex(latex, true)) || block.mathml) ? <ZoomableImage src={block.src} label={`公式${block.number ? ` ${block.number}` : ''}`} className="formula-image-open"><MathExpression latex={latex} mathml={block.mathml} src={block.src} text={block.text} displayMode /></ZoomableImage> : <MathExpression latex={latex} mathml={block.mathml} src={block.src} text={block.text} displayMode />}
-    {pdfUrl && <a className="formula-original" href={`${pdfUrl}#page=${block.page || 1}`} target="_blank" rel="noreferrer">查看原文</a>}
-    {latex && <button className="formula-copy" type="button" title={pdfUrl ? '辅助转写，可能与原公式不一致' : '原始 TeX'} onClick={() => void navigator.clipboard.writeText(latex)}>复制 TeX</button>}
-    {pdfUrl && <button className="formula-copy" type="button" onClick={() => {setDraft(latex); setEditing(value => !value); setMessage('');}}>修订转写</button>}
     {block.number != null && <span className="equation-number" aria-label={`公式编号 ${block.number}`}>({block.number})</span>}
-    {editing && <div className="formula-revision"><label htmlFor={`formula-${block.id}`}>原图的 LaTeX 转写</label><textarea id={`formula-${block.id}`} value={draft} onChange={event => setDraft(event.target.value)} rows={3} /><button type="button" onClick={() => void save()}>保存转写</button></div>}
-    {message && <p className="formula-revision-message" role="status">{message}</p>}
     <AreaMarks block={block} annotations={annotations} pages={pages} />
   </figure>;
 }
-function BlockView({block, annotations, pages, onReference, pdfUrl, documentId, prompt = false}: {block: Block; annotations: Annotation[]; pages: PageGeometry[]; onReference: (id: string) => void; pdfUrl?: string; documentId: string; prompt?: boolean}) {
+function BlockView({block, annotations, pages, onReference, pdfUrl, prompt = false}: {block: Block; annotations: Annotation[]; pages: PageGeometry[]; onReference: (id: string) => void; pdfUrl?: string; prompt?: boolean}) {
   const common = {'data-block-id': block.id, 'data-page': block.page};
   const originalPage = pdfUrl ? `${pdfUrl}#page=${block.page || 1}` : undefined;
   switch (block.type) {
-    case 'paragraph': return <p {...common} className={`area-target${prompt && /^(?:[A-Z][A-Z\s()&-]{5,}|Step \d+\s*[—–-])/.test(block.text || '') ? ' prompt-label' : ''}`}>{block.content?.length ? <Inline nodes={block.content} onReference={onReference} pdfUrl={originalPage} /> : <PlainText text={block.text || ''} onReference={onReference} />}{block.source === 'pdf_original_paragraph' && originalPage && <a className="formula-original" href={originalPage} target="_blank" rel="noreferrer">查看原文</a>}<AreaMarks block={block} annotations={annotations} pages={pages} /></p>;
+    case 'paragraph': return <p {...common} className={`area-target${prompt && /^(?:[A-Z][A-Z\s()&-]{5,}|Step \d+\s*[—–-])/.test(block.text || '') ? ' prompt-label' : ''}`}>{block.content?.length ? <Inline nodes={block.content} onReference={onReference} /> : <PlainText text={block.text || ''} onReference={onReference} />}{block.source === 'pdf_original_paragraph' && originalPage && <a className="formula-original" href={originalPage} target="_blank" rel="noreferrer">查看原文</a>}<AreaMarks block={block} annotations={annotations} pages={pages} /></p>;
     case 'figure': return <figure {...common} id={block.id} className="paper-figure area-target" onDragStart={event => event.preventDefault()}>{block.src && <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || block.label || '论文插图'} />}{block.source === 'arxiv_html_missing_visual' && <div className="source-notice">arXiv HTML 未提供这张图像。{block.sourceUrl && <a href={block.sourceUrl} target="_blank" rel="noreferrer">查看该版本的原 PDF</a>}</div>}<AreaMarks block={block} annotations={annotations} pages={pages} /><figcaption><strong>{block.label || `Figure ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption></figure>;
     case 'table': return <figure {...common} id={block.id} className="paper-figure area-target scholarly-table-figure" onDragStart={event => event.preventDefault()}><figcaption><strong>{block.label || `Table ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption>{block.src ? <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || '论文表格'} /> : <TableGrid block={block} onReference={onReference} />}<AreaMarks block={block} annotations={annotations} pages={pages} /></figure>;
-    case 'equation': return <EquationBlock block={block} annotations={annotations} pages={pages} pdfUrl={pdfUrl} documentId={documentId} />;
-    case 'list': {const List = block.listOrdered ? 'ol' : 'ul'; return <div {...common} className="area-target"><List>{(block.items || []).map((item, index) => <li key={index}>{block.listContent?.[index]?.length ? <Inline nodes={block.listContent[index]} onReference={onReference} pdfUrl={originalPage} /> : item}</li>)}</List><AreaMarks block={block} annotations={annotations} pages={pages} /></div>;}
+    case 'equation': return <EquationBlock block={block} annotations={annotations} pages={pages} />;
+    case 'list': {const List = block.listOrdered ? 'ol' : 'ul'; return <div {...common} className="area-target"><List>{(block.items || []).map((item, index) => <li key={index}>{block.listContent?.[index]?.length ? <Inline nodes={block.listContent[index]} onReference={onReference} /> : item}</li>)}</List><AreaMarks block={block} annotations={annotations} pages={pages} /></div>;}
     case 'quote': return <blockquote {...common} className="area-target">{block.text}<AreaMarks block={block} annotations={annotations} pages={pages} /></blockquote>;
     case 'heading': return <h3 {...common} className="area-target">{block.content?.length ? <Inline nodes={block.content} onReference={onReference} /> : block.text}<AreaMarks block={block} annotations={annotations} pages={pages} /></h3>;
     case 'code': return block.src ? <figure {...common} className="area-target"><AreaImage block={block} annotations={annotations} pages={pages} alt={block.text || '代码'} /><AreaMarks block={block} annotations={annotations} pages={pages} /></figure> : <pre {...common} className="area-target">{block.text}<AreaMarks block={block} annotations={annotations} pages={pages} /></pre>;
@@ -152,16 +132,16 @@ function BlockView({block, annotations, pages, onReference, pdfUrl, documentId, 
   }
 }
 
-function SectionView({section, annotations, pages, onReference, pdfUrl, documentId, arxivHtml}: {section: Section; annotations: Annotation[]; pages: PageGeometry[]; onReference: (id: string) => void; pdfUrl?: string; documentId: string; arxivHtml: boolean}) {
+function SectionView({section, annotations, pages, onReference, pdfUrl, arxivHtml}: {section: Section; annotations: Annotation[]; pages: PageGeometry[]; onReference: (id: string) => void; pdfUrl?: string; arxivHtml: boolean}) {
   const Heading = section.level === 1 ? 'h2' : section.level === 2 ? 'h3' : 'h4';
   const prompt = section.presentation === 'prompt' && (!arxivHtml || /^(?:\d+(?:\.\d+)*\.?\s*)?Prompts?$/i.test(section.title.trim()));
-  return <section id={section.id} className={section.type === 'abstract' ? 'abstract-section' : prompt ? 'prompt-section' : ''}>{section.blocks.filter(block => block.beforeHeading).map(block => <BlockView key={block.id} block={block} annotations={annotations} pages={pages} onReference={onReference} pdfUrl={pdfUrl} documentId={documentId} prompt={prompt} />)}<Heading>{section.title}</Heading>{section.blocks.filter(block => !block.beforeHeading).map(block => <BlockView key={block.id} block={block} annotations={annotations} pages={pages} onReference={onReference} pdfUrl={pdfUrl} documentId={documentId} prompt={prompt} />)}</section>;
+  return <section id={section.id} className={section.type === 'abstract' ? 'abstract-section' : prompt ? 'prompt-section' : ''}>{section.blocks.filter(block => block.beforeHeading).map(block => <BlockView key={block.id} block={block} annotations={annotations} pages={pages} onReference={onReference} pdfUrl={pdfUrl} prompt={prompt} />)}<Heading>{section.title}</Heading>{section.blocks.filter(block => !block.beforeHeading).map(block => <BlockView key={block.id} block={block} annotations={annotations} pages={pages} onReference={onReference} pdfUrl={pdfUrl} prompt={prompt} />)}</section>;
 }
 
 export default function DocumentRenderer({document: paper, annotations, onReference}: {document: DocumentModel; annotations: Annotation[]; onReference: (id: string) => void}) {
   const pdfUrl = paper.source && paper.source !== 'arxiv_html' ? `/api/parser/api/documents/${paper.id}/original.pdf` : undefined;
   return <>
     <header className="paper-header"><div className="eyebrow">{paper.arxivId ? `ARXIV · ${paper.arxivId}v${paper.arxivVersion} · ${paper.source === 'arxiv_html' ? '官方 HTML' : 'PDF 原文'}` : `PAPERLIGHT · ${paper.metadata.pageCount || '—'} PAGES`}</div><h1>{paper.metadata.title}</h1><div className="paper-authors"><p className="authors">{paper.metadata.authors.join(' · ')}</p>{paper.metadata.affiliations?.map((value, index) => <p className="author-detail" key={`affiliation-${index}`}>{value}</p>)}{paper.metadata.authorNotes?.map((value, index) => <p className="author-detail" key={`note-${index}`}>{value}</p>)}</div>{paper.metadata.venue && <p className="venue">{paper.metadata.venue} {paper.metadata.year || ''}</p>}{paper.fallbackReason && <p className="source-notice">官方 HTML 不完整，已使用固定版本的 PDF。</p>}</header>
-    {paper.sections.map(section => <SectionView key={section.id} section={section} annotations={annotations} pages={paper.pages || []} onReference={onReference} pdfUrl={pdfUrl} documentId={paper.id} arxivHtml={paper.source === 'arxiv_html'} />)}
+    {paper.sections.map(section => <SectionView key={section.id} section={section} annotations={annotations} pages={paper.pages || []} onReference={onReference} pdfUrl={pdfUrl} arxivHtml={paper.source === 'arxiv_html'} />)}
   </>;
 }
