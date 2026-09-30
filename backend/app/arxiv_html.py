@@ -126,6 +126,14 @@ def _references(article: Tag) -> tuple[list[Reference], dict[str, str]]:
 def _image(tag: Tag, source: ArxivSource, assets: Path, client: object) -> str | None:
     image = tag.find("img", src=True)
     if not image:
+        preceding = tag.find_previous_sibling()
+        if preceding and preceding.name == "div" and "ltx_para" in _classes(preceding):
+            candidates = preceding.find_all("img", src=True)
+            # LaTeXML sometimes emits an image-only paragraph immediately before
+            # the separate figure caption. Never attach ordinary paragraph images.
+            if len(candidates) == 1 and not preceding.get_text(" ", strip=True):
+                image = candidates[0]
+    if not image:
         return None
     url = urljoin(source.html_url, image["src"])
     parsed = urlparse(url)
@@ -251,3 +259,28 @@ def parse_arxiv_html(html: bytes, source: ArxivSource, document_id: str, folder:
                          readMinutes=max(1, round(body_chars / 1200))), sections=sections,
                          references=references, figures=figures, tables=tables, citationLinkStatus="linked" if references else "unresolved",
                          source="arxiv_html")
+
+
+def repair_missing_figure_assets(model: DocumentModel, html: bytes, source: ArxivSource,
+                                 folder: Path, client: object) -> int:
+    """Upgrade old HTML models without changing text blocks or annotation anchors."""
+    soup = BeautifulSoup(html, "html.parser")
+    recovered = 0
+    for figure in model.figures:
+        if figure.source != "arxiv_html_missing_visual" or figure.src or not figure.id.startswith("h-"):
+            continue
+        tag = soup.find(id=figure.id[2:])
+        if not isinstance(tag, Tag) or tag.name != "figure":
+            continue
+        filename = _image(tag, source, folder / "assets", client)
+        if not filename:
+            continue
+        figure.src = f"/api/documents/{model.id}/assets/{filename}"
+        figure.source = "arxiv_html"
+        figure.sourceUrl = ""
+        for section in model.sections:
+            for block in section.blocks:
+                if block.id == figure.id:
+                    block.src, block.source, block.sourceUrl = figure.src, figure.source, ""
+        recovered += 1
+    return recovered
