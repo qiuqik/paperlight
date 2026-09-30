@@ -5,7 +5,6 @@ import type {Annotation, Block, DocumentModel, InlineNode, PageGeometry, Section
 import {isTextAnchor} from '@/lib/document';
 
 function MathExpression({latex, mathml, text, src, displayMode = false, preferOriginal = false}: {latex?: string; mathml?: string; text?: string; src?: string; displayMode?: boolean; preferOriginal?: boolean}) {
-  if (mathml) return <span className="math-expression" aria-label={text || latex} dangerouslySetInnerHTML={{__html: mathml}} />;
   if (src) return <img className={displayMode ? 'formula-crop' : 'inline-formula-crop'} src={src} alt={text || '原 PDF 公式'} />;
   if (latex && !preferOriginal) {
     try {
@@ -13,6 +12,7 @@ function MathExpression({latex, mathml, text, src, displayMode = false, preferOr
       return <span className="math-expression" aria-label={text || latex} dangerouslySetInnerHTML={{__html: html}} />;
     } catch { /* Show the extracted text when the LaTeX cannot be parsed. */ }
   }
+  if (mathml) return <span className="math-expression" aria-label={text || latex} dangerouslySetInnerHTML={{__html: mathml}} />;
   return <span className="math-fallback">{text || '公式未能识别'}</span>;
 }
 
@@ -62,6 +62,14 @@ function AreaMarks({block, annotations, pages, surface = 'block'}: {block: Block
 function AreaImage({block, annotations, pages, alt, className}: {block: Block; annotations: Annotation[]; pages: PageGeometry[]; alt: string; className?: string}) {
   return <span className="area-surface"><img className={className} src={block.src} alt={alt} draggable={false} /><AreaMarks block={block} annotations={annotations} pages={pages} surface="image" /></span>;
 }
+function TableGrid({block, onReference}: {block: Block; onReference: (id: string) => void}) {
+  if (!block.tableRows?.length) return <div className="table-scroll"><table><thead><tr>{(block.headers || []).map((cell, index) => <th key={index}>{typeof cell === 'string' ? cell : cell.text}</th>)}</tr></thead><tbody>{(block.rows || []).map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex}>{typeof cell === 'string' ? cell : cell.text}</td>)}</tr>)}</tbody></table></div>;
+  const renderRows = (group: 'head' | 'body' | 'foot') => block.tableRows?.filter(row => row.group === group).map((row, index) => <tr key={`${group}-${index}`}>{row.cells.map((cell, cellIndex) => {
+    const Cell = cell.header ? 'th' : 'td';
+    return <Cell key={cellIndex} colSpan={cell.colSpan} rowSpan={cell.rowSpan} className={`scholarly-cell align-${cell.align} top-${cell.topRule} bottom-${cell.bottomRule}`}>{cell.content?.length ? <Inline nodes={cell.content} onReference={onReference} /> : cell.text}</Cell>;
+  })}</tr>);
+  return <div className="table-scroll scholarly-table-scroll"><table className="scholarly-table">{block.tableRows.some(row => row.group === 'head') && <thead>{renderRows('head')}</thead>}<tbody>{renderRows('body')}</tbody>{block.tableRows.some(row => row.group === 'foot') && <tfoot>{renderRows('foot')}</tfoot>}</table></div>;
+}
 function EquationBlock({block, annotations, pages, pdfUrl, documentId}: {block: Block; annotations: Annotation[]; pages: PageGeometry[]; pdfUrl?: string; documentId: string}) {
   const [latex, setLatex] = useState(block.latex || '');
   const [draft, setDraft] = useState(block.latex || '');
@@ -97,9 +105,9 @@ function BlockView({block, annotations, pages, onReference, pdfUrl, documentId, 
       ? <figure {...common} className="original-paragraph area-target"><AreaImage block={block} annotations={annotations} pages={pages} alt={block.text || '包含行内公式的原 PDF 段落'} /><figcaption>原 PDF 段落 · 行内公式以原文呈现{originalPage && <a href={originalPage} target="_blank" rel="noreferrer">查看原页</a>}<details><summary>查看提取文本</summary><PlainText text={block.text || ''} onReference={onReference} /></details></figcaption></figure>
       : <p {...common} className={`area-target${prompt && /^(?:[A-Z][A-Z\s()&-]{5,}|Step \d+\s*[—–-])/.test(block.text || '') ? ' prompt-label' : ''}`}>{block.content?.length ? <Inline nodes={block.content} onReference={onReference} pdfUrl={originalPage} /> : <PlainText text={block.text || ''} onReference={onReference} />}<AreaMarks block={block} annotations={annotations} pages={pages} /></p>;
     case 'figure': return <figure {...common} id={block.id} className="paper-figure area-target" onDragStart={event => event.preventDefault()}>{block.src && <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || block.label || '论文插图'} />}{block.source === 'arxiv_html_missing_visual' && <div className="source-notice">arXiv HTML 未提供这张图像。{block.sourceUrl && <a href={block.sourceUrl} target="_blank" rel="noreferrer">查看该版本的原 PDF</a>}</div>}<AreaMarks block={block} annotations={annotations} pages={pages} /><figcaption><strong>{block.label || `Figure ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption></figure>;
-    case 'table': return <figure {...common} id={block.id} className="paper-figure area-target" onDragStart={event => event.preventDefault()}><figcaption><strong>{block.label || `Table ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption>{block.src ? <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || '论文表格'} /> : <div className="table-scroll"><table><thead><tr>{(block.headers || []).map((cell, index) => <th key={index}>{typeof cell === 'string' ? cell : cell.text}</th>)}</tr></thead><tbody>{(block.rows || []).map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex}>{typeof cell === 'string' ? cell : cell.text}</td>)}</tr>)}</tbody></table></div>}<AreaMarks block={block} annotations={annotations} pages={pages} /></figure>;
+    case 'table': return <figure {...common} id={block.id} className="paper-figure area-target scholarly-table-figure" onDragStart={event => event.preventDefault()}><figcaption><strong>{block.label || `Table ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption>{block.src ? <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || '论文表格'} /> : <TableGrid block={block} onReference={onReference} />}<AreaMarks block={block} annotations={annotations} pages={pages} /></figure>;
     case 'equation': return <EquationBlock block={block} annotations={annotations} pages={pages} pdfUrl={pdfUrl} documentId={documentId} />;
-    case 'list': return <div {...common} className="area-target"><ul>{(block.items || []).map((item, index) => <li key={index}>{item}</li>)}</ul><AreaMarks block={block} annotations={annotations} pages={pages} /></div>;
+    case 'list': {const List = block.listOrdered ? 'ol' : 'ul'; return <div {...common} className="area-target"><List>{(block.items || []).map((item, index) => <li key={index}>{block.listContent?.[index]?.length ? <Inline nodes={block.listContent[index]} onReference={onReference} pdfUrl={originalPage} /> : item}</li>)}</List><AreaMarks block={block} annotations={annotations} pages={pages} /></div>;}
     case 'quote': return <blockquote {...common} className="area-target">{block.text}<AreaMarks block={block} annotations={annotations} pages={pages} /></blockquote>;
     case 'heading': return <h3 {...common} className="area-target">{block.content?.length ? <Inline nodes={block.content} onReference={onReference} /> : block.text}<AreaMarks block={block} annotations={annotations} pages={pages} /></h3>;
     case 'code': return block.src ? <figure {...common} className="area-target"><AreaImage block={block} annotations={annotations} pages={pages} alt={block.text || '代码'} /><AreaMarks block={block} annotations={annotations} pages={pages} /></figure> : <pre {...common} className="area-target">{block.text}<AreaMarks block={block} annotations={annotations} pages={pages} /></pre>;
@@ -108,9 +116,9 @@ function BlockView({block, annotations, pages, onReference, pdfUrl, documentId, 
   }
 }
 
-function SectionView({section, annotations, pages, onReference, pdfUrl, documentId}: {section: Section; annotations: Annotation[]; pages: PageGeometry[]; onReference: (id: string) => void; pdfUrl?: string; documentId: string}) {
+function SectionView({section, annotations, pages, onReference, pdfUrl, documentId, arxivHtml}: {section: Section; annotations: Annotation[]; pages: PageGeometry[]; onReference: (id: string) => void; pdfUrl?: string; documentId: string; arxivHtml: boolean}) {
   const Heading = section.level === 1 ? 'h2' : section.level === 2 ? 'h3' : 'h4';
-  const prompt = section.presentation === 'prompt';
+  const prompt = section.presentation === 'prompt' && (!arxivHtml || /^(?:\d+(?:\.\d+)*\.?\s*)?Prompts?$/i.test(section.title.trim()));
   return <section id={section.id} className={section.type === 'abstract' ? 'abstract-section' : prompt ? 'prompt-section' : ''}>{section.blocks.filter(block => block.beforeHeading).map(block => <BlockView key={block.id} block={block} annotations={annotations} pages={pages} onReference={onReference} pdfUrl={pdfUrl} documentId={documentId} prompt={prompt} />)}<Heading>{section.title}</Heading>{section.blocks.filter(block => !block.beforeHeading).map(block => <BlockView key={block.id} block={block} annotations={annotations} pages={pages} onReference={onReference} pdfUrl={pdfUrl} documentId={documentId} prompt={prompt} />)}</section>;
 }
 
@@ -118,6 +126,6 @@ export default function DocumentRenderer({document: paper, annotations, onRefere
   const pdfUrl = paper.source && paper.source !== 'arxiv_html' ? `/api/parser/api/documents/${paper.id}/original.pdf` : undefined;
   return <>
     <header className="paper-header"><div className="eyebrow">{paper.arxivId ? `ARXIV · ${paper.arxivId}v${paper.arxivVersion} · ${paper.source === 'arxiv_html' ? '官方 HTML' : 'PDF 原文'}` : `PAPERLIGHT · ${paper.metadata.pageCount || '—'} PAGES`}</div><h1>{paper.metadata.title}</h1><p className="authors">{paper.metadata.authors.join(' · ')}</p>{paper.metadata.venue && <p className="venue">{paper.metadata.venue} {paper.metadata.year || ''}</p>}{paper.fallbackReason && <p className="source-notice">官方 HTML 不完整，已使用固定版本的 PDF。</p>}</header>
-    {paper.sections.map(section => <SectionView key={section.id} section={section} annotations={annotations} pages={paper.pages || []} onReference={onReference} pdfUrl={pdfUrl} documentId={paper.id} />)}
+    {paper.sections.map(section => <SectionView key={section.id} section={section} annotations={annotations} pages={paper.pages || []} onReference={onReference} pdfUrl={pdfUrl} documentId={paper.id} arxivHtml={paper.source === 'arxiv_html'} />)}
   </>;
 }

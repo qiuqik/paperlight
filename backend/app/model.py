@@ -25,6 +25,22 @@ class InlineNode(BaseModel):
     number: int | None = None
 
 
+class TableCell(BaseModel):
+    text: str = ""
+    content: list[InlineNode] = Field(default_factory=list)
+    header: bool = False
+    colSpan: int = 1
+    rowSpan: int = 1
+    align: Literal["left", "center", "right"] = "left"
+    topRule: Literal["none", "single", "double"] = "none"
+    bottomRule: Literal["none", "single", "double"] = "none"
+
+
+class TableRow(BaseModel):
+    group: Literal["head", "body", "foot"] = "body"
+    cells: list[TableCell] = Field(default_factory=list)
+
+
 class Block(BaseModel):
     id: str
     type: Literal["paragraph", "heading", "figure", "table", "equation", "list", "quote", "footnote", "requirement", "code"]
@@ -40,6 +56,8 @@ class Block(BaseModel):
     bbox: dict[str, float] | None = None
     order: int | None = None
     items: list[str] = Field(default_factory=list)
+    listContent: list[list[InlineNode]] = Field(default_factory=list)
+    listOrdered: bool = False
     number: int | None = None
     label: str = ""
     caption: str = ""
@@ -48,6 +66,7 @@ class Block(BaseModel):
     beforeHeading: bool = False
     headers: list[Any] = Field(default_factory=list)
     rows: list[list[Any]] = Field(default_factory=list)
+    tableRows: list[TableRow] = Field(default_factory=list)
 
 
 class Section(BaseModel):

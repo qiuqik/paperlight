@@ -1,4 +1,4 @@
-"""Repair previously imported HTML figures whose image precedes their caption."""
+"""Repair previously imported arXiv HTML figures and layout metadata."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ import json
 import httpx
 
 from . import main
-from .arxiv_html import repair_missing_figure_assets
+from .arxiv_html import repair_missing_figure_assets, upgrade_html_layout
 from .arxiv_source import ArxivSource
 from .model import DocumentModel
 
 
-def repair(document_id: str) -> int:
+def repair(document_id: str) -> tuple[int, int]:
     record = main.ACCOUNTS.document(document_id)
     if not record:
         raise ValueError("Document not found.")
@@ -24,19 +24,22 @@ def repair(document_id: str) -> int:
     if model.source != "arxiv_html" or not model.arxivId or not model.arxivVersion or not html_path.is_file():
         raise ValueError("Document is not a saved arXiv HTML import.")
     source = ArxivSource(model.arxivId, model.arxivVersion, model.sourceUrl)
+    html = html_path.read_bytes()
     with httpx.Client(headers={"User-Agent": "Paperlight/0.3"}, timeout=30) as client:
-        count = repair_missing_figure_assets(model, html_path.read_bytes(), source, folder, client)
-    if count:
+        figure_count = repair_missing_figure_assets(model, html, source, folder, client)
+    layout_count = upgrade_html_layout(model, html)
+    if figure_count or layout_count:
         backup = folder / "document.json.before-figure-repair"
         if not backup.exists():
             backup.write_bytes(path.read_bytes())
         main._atomic_json(path, model.model_dump(mode="json"))
         main._save_result(document_id)
-    return count
+    return figure_count, layout_count
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--id", required=True, help="Existing arXiv HTML document ID")
     args = parser.parse_args()
-    print(f"Recovered {repair(args.id)} figure image(s).")
+    figures, layout = repair(args.id)
+    print(f"Recovered {figures} figure image(s) and {layout} layout element(s).")

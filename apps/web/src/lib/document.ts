@@ -1,11 +1,13 @@
 export type Box = {x: number; y: number; width: number; height: number};
 export type InlineNode = {type: string; text?: string; display?: string; latex?: string; mathml?: string; source?: string; bold?: boolean; italic?: boolean; referenceIds?: string[]; href?: string; figureId?: string; tableId?: string; src?: string; number?: number};
+export type TableCell = {text: string; content?: InlineNode[]; header: boolean; colSpan: number; rowSpan: number; align: 'left' | 'center' | 'right'; topRule: 'none' | 'single' | 'double'; bottomRule: 'none' | 'single' | 'double'};
+export type TableRow = {group: 'head' | 'body' | 'foot'; cells: TableCell[]};
 export type Block = {
   id: string; type: string; text?: string; latex?: string; mathml?: string; source?: string; sourceUrl?: string; content?: InlineNode[]; page?: number; bbox?: Box; order?: number;
-  items?: string[]; number?: number; label?: string; caption?: string; src?: string;
+  items?: string[]; listContent?: InlineNode[][]; listOrdered?: boolean; number?: number; label?: string; caption?: string; src?: string;
   captionContent?: InlineNode[];
   beforeHeading?: boolean;
-  headers?: Array<{text: string} | string>; rows?: Array<Array<{text: string} | string>>;
+  headers?: Array<{text: string} | string>; rows?: Array<Array<{text: string} | string>>; tableRows?: TableRow[];
 };
 export type Section = {id: string; title: string; level: number; type?: string; presentation?: 'article' | 'prompt'; blocks: Block[]};
 export type Reference = {id: string; number: number; authors: string; title: string; venue?: string; year?: number; doi?: string; preview?: string};

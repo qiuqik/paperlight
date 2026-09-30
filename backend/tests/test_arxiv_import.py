@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import httpx
 
-from backend.app.arxiv_html import parse_arxiv_html, repair_missing_figure_assets
+from backend.app.arxiv_html import parse_arxiv_html, repair_missing_figure_assets, upgrade_html_layout
 from backend.app.arxiv_source import ArxivSource, resolve_arxiv_url
 
 
@@ -79,6 +79,38 @@ class ArxivImportTests(unittest.TestCase):
         self.assertEqual(model.figures[0].sourceUrl, "https://export.arxiv.org/pdf/2603.17965v1")
         self.assertEqual(model.sections[1].presentation, "prompt")
         self.assertIn("Grading prompt", [block.text for block in model.sections[1].blocks])
+
+    def test_list_markers_prompt_sections_and_table_spans_keep_source_structure(self) -> None:
+        body = "A substantial paragraph about the result. " * 20
+        html = f'''<article class="ltx_document"><h1 class="ltx_title_document">A study</h1>
+        <section class="ltx_section" id="S1"><h2>3.3 Prompt Processing</h2>
+        <div class="ltx_para"><p class="ltx_p">{body}</p></div>
+        <ul id="S1.I1"><li class="ltx_item"><span class="ltx_tag ltx_tag_item">•</span><div class="ltx_para"><p class="ltx_p">We introduce LaDe.</p></div></li></ul>
+        <figure class="ltx_table" id="S1.T1"><figcaption>Table 1: Results</figcaption>
+        <table class="ltx_tabular"><thead><tr><th class="ltx_border_tt" colspan="2">Grouped <math display="inline"><semantics><mo>↑</mo><annotation encoding="application/x-tex">\\uparrow</annotation></semantics></math></th></tr></thead>
+        <tbody><tr><th class="ltx_align_left">Method</th><td class="ltx_align_center ltx_border_bb"><span class="ltx_font_bold">3.58</span></td></tr></tbody></table></figure></section>
+        <section class="ltx_section" id="S2"><h2>8 Prompts</h2><div class="ltx_para"><p class="ltx_p">{body}</p></div></section></article>'''
+        with tempfile.TemporaryDirectory() as directory:
+            model = parse_arxiv_html(html.encode(), ArxivSource("2603.17965", 1, ""),
+                                      "a" * 32, Path(directory), object())
+        self.assertEqual(model.sections[0].presentation, "article")
+        self.assertEqual(model.sections[1].presentation, "prompt")
+        listed = next(block for block in model.sections[0].blocks if block.type == "list")
+        self.assertEqual(listed.items, ["We introduce LaDe."])
+        self.assertNotIn("•", "".join(node.text for node in listed.listContent[0]))
+        table = model.tables[0]
+        self.assertEqual(table.tableRows[0].cells[0].colSpan, 2)
+        self.assertEqual(table.tableRows[0].cells[0].content[-1].latex, "\\uparrow")
+        self.assertTrue(table.tableRows[1].cells[1].content[0].bold)
+        model.sections[0].presentation = "prompt"
+        listed.listContent = []
+        for block in model.sections[0].blocks:
+            if block.type == "table":
+                block.tableRows = []
+        self.assertGreaterEqual(upgrade_html_layout(model, html.encode()), 3)
+        self.assertEqual(model.sections[0].presentation, "article")
+        self.assertTrue(listed.listContent)
+        self.assertTrue(next(block for block in model.sections[0].blocks if block.type == "table").tableRows)
 
 
 if __name__ == "__main__":

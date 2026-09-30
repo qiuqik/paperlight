@@ -12,7 +12,7 @@ import httpx
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 from .arxiv_source import ArxivSource, official_get
-from .model import Block, DocumentModel, InlineNode, Metadata, Reference, Section
+from .model import Block, DocumentModel, InlineNode, Metadata, Reference, Section, TableCell, TableRow
 
 
 MATH_TAGS = {"math", "semantics", "mrow", "mi", "mn", "mo", "mtext", "ms", "mspace", "msub", "msup", "msubsup",
@@ -123,6 +123,53 @@ def _references(article: Tag) -> tuple[list[Reference], dict[str, str]]:
     return entries, mapping
 
 
+def _prompt_section(title: str) -> bool:
+    return bool(re.fullmatch(r"(?:\d+(?:\.\d+)*\.?\s*)?Prompts?", title.strip(), re.I))
+
+
+def _list_content(tag: Tag, references: dict[str, str]) -> tuple[list[str], list[list[InlineNode]]]:
+    items: list[str] = []
+    content: list[list[InlineNode]] = []
+    for item in tag.find_all("li", recursive=False):
+        value = _text(item)
+        marker = _text(item.select_one(".ltx_tag_item"))
+        if marker and value.startswith(marker):
+            value = value[len(marker):].lstrip()
+        items.append(value)
+        content.append(_inline(item, references))
+    return items, content
+
+
+def _table_rows(figure: Tag, references: dict[str, str]) -> list[TableRow]:
+    table = figure.select_one("table.ltx_tabular")
+    if not table:
+        return []
+    def span(value: object) -> int:
+        try:
+            return min(20, max(1, int(str(value))))
+        except (TypeError, ValueError):
+            return 1
+
+    rows: list[TableRow] = []
+    for row in table.find_all("tr"):
+        parent = row.find_parent(["thead", "tbody", "tfoot"])
+        group = {"thead": "head", "tfoot": "foot"}.get(parent.name if parent else "", "body")
+        cells: list[TableCell] = []
+        for cell in row.find_all(["th", "td"], recursive=False):
+            classes = _classes(cell)
+            align = "right" if "ltx_align_right" in classes else "center" if "ltx_align_center" in classes else "left"
+            border = {value.removeprefix("ltx_border_") for value in classes if value.startswith("ltx_border_")}
+            top = "double" if any(value.startswith("tt") for value in border) else "single" if any(value.startswith("t") for value in border) else "none"
+            bottom = "double" if any(value.endswith("bb") for value in border) else "single" if any(value.endswith("b") for value in border) else "none"
+            cells.append(TableCell(text=_text(cell), content=_inline(cell, references), header=cell.name == "th",
+                                   colSpan=span(cell.get("colspan", 1)),
+                                   rowSpan=span(cell.get("rowspan", 1)),
+                                   align=align, topRule=top, bottomRule=bottom))
+        if cells:
+            rows.append(TableRow(group=group, cells=cells))
+    return rows
+
+
 def _image(tag: Tag, source: ArxivSource, assets: Path, client: object) -> str | None:
     image = tag.find("img", src=True)
     if not image:
@@ -204,6 +251,7 @@ def parse_arxiv_html(html: bytes, source: ArxivSource, document_id: str, folder:
                               source="arxiv_html" if image_name or kind == "table" else "arxiv_html_missing_visual",
                               sourceUrl=f"https://export.arxiv.org/pdf/{source.versioned_id}" if not image_name else "")
                 if kind == "table":
+                    block.tableRows = _table_rows(child, reference_ids)
                     rows = [[_text(cell) for cell in row.find_all(["td", "th"], recursive=False)] for row in child.select("table.ltx_tabular tr")]
                     if rows:
                         block.headers = rows[0]
@@ -229,16 +277,17 @@ def parse_arxiv_html(html: bytes, source: ArxivSource, document_id: str, folder:
                     section.blocks.append(Block(id=_safe_id(str(child.get("id")), "h-"),
                                                 type="paragraph", text=value, content=content))
             elif child.name in {"ul", "ol"}:
-                items = [_text(item) for item in child.find_all("li", recursive=False)]
+                items, list_content = _list_content(child, reference_ids)
                 if items:
-                    section.blocks.append(Block(id=_safe_id(str(child.get("id")), "h-list-"), type="list", items=items))
+                    section.blocks.append(Block(id=_safe_id(str(child.get("id")), "h-list-"), type="list", items=items,
+                                                listContent=list_content, listOrdered=child.name == "ol"))
 
     def add_section(tag: Tag, level: int) -> None:
         title_tag = tag.find(["h2", "h3", "h4", "h5"], recursive=False)
         heading = _text(title_tag) or "Section"
         section = Section(id=_safe_id(str(tag.get("id")), "h-"), title=heading, level=min(level, 3),
                           type="appendix" if "ltx_appendix" in _classes(tag) else "body",
-                          presentation="prompt" if re.search(r"\bprompts?\b", heading, re.I) else "article")
+                          presentation="prompt" if _prompt_section(heading) else "article")
         sections.append(section)
         add_content(tag, section)
 
@@ -284,3 +333,39 @@ def repair_missing_figure_assets(model: DocumentModel, html: bytes, source: Arxi
                     block.src, block.source, block.sourceUrl = figure.src, figure.source, ""
         recovered += 1
     return recovered
+
+
+def upgrade_html_layout(model: DocumentModel, html: bytes) -> int:
+    """Restore list and table structure in saved HTML models without changing block IDs."""
+    soup = BeautifulSoup(html, "html.parser")
+    article = soup.select_one("article.ltx_document")
+    if not article:
+        return 0
+    _, reference_ids = _references(article)
+    changed = 0
+    for section in model.sections:
+        presentation = "prompt" if _prompt_section(section.title) else "article"
+        if section.presentation != presentation:
+            section.presentation = presentation
+            changed += 1
+        for block in section.blocks:
+            if block.type == "list" and block.id.startswith("h-list-"):
+                tag = article.find(id=block.id.removeprefix("h-list-"))
+                if isinstance(tag, Tag) and tag.name in {"ul", "ol"}:
+                    _, content = _list_content(tag, reference_ids)
+                    if len(content) == len(block.items) and (block.listContent != content or block.listOrdered != (tag.name == "ol")):
+                        block.listContent = content
+                        block.listOrdered = tag.name == "ol"
+                        changed += 1
+            elif block.type == "table" and block.id.startswith("h-"):
+                tag = article.find(id=block.id[2:])
+                if isinstance(tag, Tag) and tag.name == "figure":
+                    rows = _table_rows(tag, reference_ids)
+                    if rows and block.tableRows != rows:
+                        block.tableRows = rows
+                        changed += 1
+    for table in model.tables:
+        matching = next((block for section in model.sections for block in section.blocks if block.id == table.id), None)
+        if matching and table.tableRows != matching.tableRows:
+            table.tableRows = matching.tableRows
+    return changed
