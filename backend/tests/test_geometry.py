@@ -77,6 +77,26 @@ class GeometryTests(unittest.TestCase):
             Section(id="study", title="A Study of Streamgraphs", blocks=[])])
         self.assertEqual(finalize_document_model(model).sections[0].title, "1 A Study of Streamgraphs")
 
+    def test_heading_cleanup_keeps_acronyms_and_section_hierarchy(self) -> None:
+        model = DocumentModel(id="paper", metadata=Metadata(), sections=[
+            Section(id="intro", title="1 Introduction", level=1),
+            Section(id="related", title="2 Related Work", level=1),
+            Section(id="agent", title="2.2 LLM Agent for Visual Analytics", level=2),
+            Section(id="question", title="2.2.1 RQ1: When to Assist?", level=3)])
+        self.assertEqual([section.title for section in finalize_document_model(model).sections], [
+            "1 Introduction", "2 Related Work", "2.1 LLM Agent for Visual Analytics",
+            "2.1.1 RQ1: When to Assist?"])
+
+    def test_uncaptioned_icon_is_removed_and_paragraph_text_replaces_crop(self) -> None:
+        icon = Block(id="figure-1", type="figure", page=1, bbox={"x": 10, "y": 10, "width": 10, "height": 10}, src="/icon.png")
+        figure = Block(id="figure-2", type="figure", page=1, bbox={"x": 20, "y": 20, "width": 200, "height": 120}, caption="Overview", src="/figure.png")
+        paragraph = Block(id="paragraph", type="paragraph", text="An inline expression x_i remains selectable.", src="/crop.png", source="pdf_original_paragraph")
+        model = DocumentModel(id="paper", metadata=Metadata(), sections=[Section(id="intro", title="Introduction", blocks=[icon, figure, paragraph])], figures=[icon, figure])
+        cleaned = finalize_document_model(model)
+        self.assertEqual([block.id for block in cleaned.sections[0].blocks], ["figure-2", "paragraph"])
+        self.assertEqual([item.id for item in cleaned.figures], ["figure-2"])
+        self.assertIsNone(paragraph.src)
+
     def test_list_cleanup_removes_parser_bullet_from_saved_and_new_models(self) -> None:
         model = DocumentModel(id="paper", metadata=Metadata(), sections=[
             Section(id="intro", title="Introduction", blocks=[Block(id="findings", type="list", items=[

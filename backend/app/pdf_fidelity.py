@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .model import DocumentModel
+from .model import Block, DocumentModel
 
 
 MATH_FONT = re.compile(r"(?:math|cmmi|cmsy|msbm|symbol|stix|mt2|euler)", re.I)
@@ -35,6 +35,77 @@ def _crop(pdf: Any, page_number: int, box: dict[str, float], target: Path) -> bo
         return True
     except (IndexError, KeyError, OSError, ValueError):
         return False
+
+
+def recover_missing_pdf_figures(model: DocumentModel, pdf_path: Path, folder: Path) -> int:
+    """Recover only wide image groups with an explicit Fig. caption in the PDF.
+
+    PDF publishers sometimes flatten a table-like figure into adjacent image tiles.
+    A numbered caption, close image edges, and a wide combined box are all required;
+    otherwise we leave the original PDF as the source of truth.
+    """
+    try:
+        import pymupdf
+        import pypdfium2 as pdfium
+    except ImportError:
+        return 0
+    from .normalizer import _numbered_citations, clean_text
+
+    existing = {figure.number for figure in model.figures if figure.number is not None}
+    recovered = 0
+    with pymupdf.open(pdf_path) as geometry:
+        raster = pdfium.PdfDocument(str(pdf_path))
+        try:
+            for page_index, page in enumerate(geometry):
+                images = [tuple(info["bbox"]) for info in page.get_image_info()
+                          if info["bbox"][2] - info["bbox"][0] >= 25
+                          and info["bbox"][3] - info["bbox"][1] >= 25]
+                for caption_box in page.get_text("blocks"):
+                    caption = clean_text(caption_box[4])
+                    match = re.match(r"^Fig(?:ure)?\.?(?:\s*)(\d+)\s*[:.]\s*(.+)", caption, re.I)
+                    if not match:
+                        continue
+                    number = int(match.group(1))
+                    if number in existing or caption_box[1] > page.rect.height * .45:
+                        continue
+                    nearby = [box for box in images if 0 <= caption_box[1] - box[3] <= 35]
+                    if not nearby:
+                        continue
+                    anchor = max(nearby, key=lambda box: box[2] - box[0])
+                    group = [box for box in nearby if abs(box[1] - anchor[1]) <= 18]
+                    left = min(box[0] for box in group)
+                    top = min(box[1] for box in group)
+                    right = max(box[2] for box in group)
+                    bottom = max(box[3] for box in group)
+                    if right - left < page.rect.width * .55 or bottom > caption_box[1] - 2:
+                        continue
+                    box = {"x": left, "y": top, "width": right - left, "height": bottom - top}
+                    asset = folder / "assets" / f"recovered_figure_{number}.png"
+                    if not _crop(raster, page_index + 1, box, asset):
+                        continue
+                    block = Block(id=f"figure-{number}", type="figure", number=number,
+                                  label=f"Figure {number}", caption=match.group(2),
+                                  captionContent=_numbered_citations(match.group(2), model.references),
+                                  page=page_index + 1, bbox=box, source="pdf_original_crop",
+                                  src=f"/api/documents/{model.id}/assets/{asset.name}")
+                    target = next(((section, index) for section in model.sections
+                                   for index, item in enumerate(section.blocks)
+                                   if item.page == page_index + 1 and item.bbox
+                                   and item.bbox.get("y", 0) >= caption_box[3]), None)
+                    if target:
+                        target[0].blocks.insert(target[1], block)
+                    else:
+                        section = next((section for section in model.sections
+                                        if any(item.page == page_index + 1 for item in section.blocks)), None)
+                        if section is None:
+                            continue
+                        section.blocks.append(block)
+                    model.figures.append(block)
+                    existing.add(number)
+                    recovered += 1
+        finally:
+            raster.close()
+    return recovered
 
 
 def preserve_uncertain_inline_math(model: DocumentModel, pdf_path: Path, folder: Path) -> int:

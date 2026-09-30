@@ -1,5 +1,5 @@
 'use client';
-import {useState} from 'react';
+import {useEffect, useState} from 'react';
 import katex from 'katex';
 import type {Annotation, Block, DocumentModel, InlineNode, PageGeometry, Section} from '@/lib/document';
 import {isTextAnchor} from '@/lib/document';
@@ -24,7 +24,7 @@ function Inline({nodes, onReference, pdfUrl}: {nodes: InlineNode[]; onReference:
     if (node.type === 'figureLink' || node.type === 'tableLink') return <button className="inline-link" key={index} onClick={() => document.getElementById(node.figureId || node.tableId || '')?.scrollIntoView({behavior: 'smooth'})}>{label}</button>;
     if (node.type === 'link' && /^https?:\/\//.test(node.href || '')) return <a key={index} href={node.href} target="_blank" rel="noreferrer">{label}</a>;
     if (node.type === 'link' && node.href?.startsWith('#h-')) return <a key={index} href={node.href}>{label}</a>;
-    let content: React.ReactNode = label;
+    let content: React.ReactNode = node.type === 'text' ? <PlainText text={label} onReference={onReference} /> : label;
     if (node.bold) content = <strong>{content}</strong>;
     if (node.italic) content = <em>{content}</em>;
     if (node.type === 'superscript') content = <sup>{content}</sup>;
@@ -33,12 +33,12 @@ function Inline({nodes, onReference, pdfUrl}: {nodes: InlineNode[]; onReference:
   })}</>;
 }
 function PlainText({text, onReference}: {text: string; onReference: (id: string) => void}) {
-  return <>{text.split(/(\[\d+(?:\s*[,–-]\s*\d+)*\]|\b(?:Fig(?:ure)?\.?|Table)\s+\d+\b)/gi).map((part, index) => {
+  return <>{text.split(/(\[\d+(?:\s*[,–-]\s*\d+)*\]|\b(?:Fig(?:ure)?\.?|Table)\s*\d+\b)/gi).map((part, index) => {
     const citation = part.match(/^\[(\d+)\]$/);
     if (citation) return <button className="inline-link" key={index} onClick={() => onReference(citation[1])}>{part}</button>;
-    const figure = part.match(/^(?:Fig(?:ure)?\.?)\s+(\d+)$/i);
+    const figure = part.match(/^(?:Fig(?:ure)?\.?)\s*(\d+)$/i);
     if (figure) return <button className="inline-link" key={index} onClick={() => document.getElementById(`figure-${figure[1]}`)?.scrollIntoView({behavior: 'smooth'})}>{part}</button>;
-    const table = part.match(/^Table\s+(\d+)$/i);
+    const table = part.match(/^Table\s*(\d+)$/i);
     if (table) return <button className="inline-link" key={index} onClick={() => document.getElementById(`table-${table[1]}`)?.scrollIntoView({behavior: 'smooth'})}>{part}</button>;
     return <span key={index}>{part}</span>;
   })}</>;
@@ -98,14 +98,22 @@ function EquationBlock({block, annotations, pages, pdfUrl, documentId}: {block: 
   </figure>;
 }
 function BlockView({block, annotations, pages, onReference, pdfUrl, documentId, prompt = false}: {block: Block; annotations: Annotation[]; pages: PageGeometry[]; onReference: (id: string) => void; pdfUrl?: string; documentId: string; prompt?: boolean}) {
+  const [preview, setPreview] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  useEffect(() => {
+    if (!preview) return;
+    const closeOnEscape = (event: KeyboardEvent) => {if (event.key === 'Escape') setPreview(false);};
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [preview]);
+  const enlarge = block.src && <button type="button" className="figure-enlarge" onClick={() => {setZoom(1); setPreview(true);}}>放大查看</button>;
+  const lightbox = preview && block.src && <div className="figure-lightbox" role="dialog" aria-modal="true" aria-label={`${block.label || '论文图表'}放大查看`} onMouseDown={event => {if (event.target === event.currentTarget) setPreview(false);}}><div className="figure-lightbox-toolbar"><span>{block.label || '论文图表'}</span><button type="button" onClick={() => setZoom(value => Math.max(.5, value - .25))} aria-label="缩小">−</button><button type="button" onClick={() => setZoom(value => Math.min(4, value + .25))} aria-label="放大">＋</button><span>{Math.round(zoom * 100)}%</span><button type="button" onClick={() => setPreview(false)} aria-label="关闭">×</button></div><div className="figure-lightbox-scroll"><img src={block.src} alt={block.caption || block.label || '论文图表'} style={{width: `${zoom * 100}%`}} /></div></div>;
   const common = {'data-block-id': block.id, 'data-page': block.page};
   const originalPage = pdfUrl ? `${pdfUrl}#page=${block.page || 1}` : undefined;
   switch (block.type) {
-    case 'paragraph': return block.source === 'pdf_original_paragraph' && block.src
-      ? <figure {...common} className="original-paragraph area-target"><AreaImage block={block} annotations={annotations} pages={pages} alt={block.text || '包含行内公式的原 PDF 段落'} /><figcaption>原 PDF 段落 · 行内公式以原文呈现{originalPage && <a href={originalPage} target="_blank" rel="noreferrer">查看原页</a>}<details><summary>查看提取文本</summary><PlainText text={block.text || ''} onReference={onReference} /></details></figcaption></figure>
-      : <p {...common} className={`area-target${prompt && /^(?:[A-Z][A-Z\s()&-]{5,}|Step \d+\s*[—–-])/.test(block.text || '') ? ' prompt-label' : ''}`}>{block.content?.length ? <Inline nodes={block.content} onReference={onReference} pdfUrl={originalPage} /> : <PlainText text={block.text || ''} onReference={onReference} />}<AreaMarks block={block} annotations={annotations} pages={pages} /></p>;
-    case 'figure': return <figure {...common} id={block.id} className="paper-figure area-target" onDragStart={event => event.preventDefault()}>{block.src && <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || block.label || '论文插图'} />}{block.source === 'arxiv_html_missing_visual' && <div className="source-notice">arXiv HTML 未提供这张图像。{block.sourceUrl && <a href={block.sourceUrl} target="_blank" rel="noreferrer">查看该版本的原 PDF</a>}</div>}<AreaMarks block={block} annotations={annotations} pages={pages} /><figcaption><strong>{block.label || `Figure ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption></figure>;
-    case 'table': return <figure {...common} id={block.id} className="paper-figure area-target scholarly-table-figure" onDragStart={event => event.preventDefault()}><figcaption><strong>{block.label || `Table ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption>{block.src ? <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || '论文表格'} /> : <TableGrid block={block} onReference={onReference} />}<AreaMarks block={block} annotations={annotations} pages={pages} /></figure>;
+    case 'paragraph': return <p {...common} className={`area-target${prompt && /^(?:[A-Z][A-Z\s()&-]{5,}|Step \d+\s*[—–-])/.test(block.text || '') ? ' prompt-label' : ''}`}>{block.content?.length ? <Inline nodes={block.content} onReference={onReference} pdfUrl={originalPage} /> : <PlainText text={block.text || ''} onReference={onReference} />}{block.source === 'pdf_original_paragraph' && originalPage && <a className="formula-original" href={originalPage} target="_blank" rel="noreferrer">查看原文</a>}<AreaMarks block={block} annotations={annotations} pages={pages} /></p>;
+    case 'figure': return <figure {...common} id={block.id} className="paper-figure area-target" onDragStart={event => event.preventDefault()}>{block.src && <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || block.label || '论文插图'} />}{enlarge}{lightbox}{block.source === 'arxiv_html_missing_visual' && <div className="source-notice">arXiv HTML 未提供这张图像。{block.sourceUrl && <a href={block.sourceUrl} target="_blank" rel="noreferrer">查看该版本的原 PDF</a>}</div>}<AreaMarks block={block} annotations={annotations} pages={pages} /><figcaption><strong>{block.label || `Figure ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption></figure>;
+    case 'table': return <figure {...common} id={block.id} className="paper-figure area-target scholarly-table-figure" onDragStart={event => event.preventDefault()}><figcaption><strong>{block.label || `Table ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption>{block.src ? <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || '论文表格'} /> : <TableGrid block={block} onReference={onReference} />}{enlarge}{lightbox}<AreaMarks block={block} annotations={annotations} pages={pages} /></figure>;
     case 'equation': return <EquationBlock block={block} annotations={annotations} pages={pages} pdfUrl={pdfUrl} documentId={documentId} />;
     case 'list': {const List = block.listOrdered ? 'ol' : 'ul'; return <div {...common} className="area-target"><List>{(block.items || []).map((item, index) => <li key={index}>{block.listContent?.[index]?.length ? <Inline nodes={block.listContent[index]} onReference={onReference} pdfUrl={originalPage} /> : item}</li>)}</List><AreaMarks block={block} annotations={annotations} pages={pages} /></div>;}
     case 'quote': return <blockquote {...common} className="area-target">{block.text}<AreaMarks block={block} annotations={annotations} pages={pages} /></blockquote>;

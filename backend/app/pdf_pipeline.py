@@ -16,8 +16,8 @@ import httpx
 
 from .model import DocumentModel
 from .normalizer import extract_pdf_references, normalize_docling, parse_grobid
-from .pdf_fidelity import preserve_uncertain_inline_math
 from .mineru_normalizer import normalize_mineru
+from .pdf_fidelity import recover_missing_pdf_figures
 
 
 @dataclass
@@ -85,9 +85,7 @@ def _parse_mineru(pdf_path: Path, document_id: str, filename: str, folder: Path,
             (assets / parts[1]).write_bytes(archive.read(item))
     (folder / "mineru.json").write_text(json.dumps(middle, ensure_ascii=False), encoding="utf-8")
     model = normalize_mineru(middle, document_id, folder, pdf_path)
-    preserved = preserve_uncertain_inline_math(model, pdf_path, folder)
-    return PdfParseResult(model, {"mineruSeconds": round(time.perf_counter() - started, 2),
-                                  "originalInlineParagraphs": float(preserved)}, False)
+    return PdfParseResult(model, {"mineruSeconds": round(time.perf_counter() - started, 2)}, False)
 
 
 def parse_pdf(pdf_path: Path, document_id: str, filename: str, folder: Path, grobid_url: str,
@@ -142,8 +140,10 @@ def _parse_docling(pdf_path: Path, document_id: str, filename: str, folder: Path
     progress("normalizing_document", .9)
     normalizing = time.perf_counter()
     model = normalize_docling(document, document_id, folder, grobid_data, references)
-    preserved = preserve_uncertain_inline_math(model, pdf_path, folder)
-    timings["originalInlineParagraphs"] = float(preserved)
+    timings["recoveredFigures"] = float(recover_missing_pdf_figures(model, pdf_path, folder))
+    model.figures.sort(key=lambda figure: (figure.number is None, figure.number or 0))
+    for order, block in enumerate(block for section in model.sections for block in section.blocks):
+        block.order = order
     if use_grobid and not grobid_data:
         model.metadata.notice = "GROBID 暂不可用；已尝试从 PDF 文本恢复编号参考文献，出版元数据可能不完整。"
     elif not grobid_data.get("references"):

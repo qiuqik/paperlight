@@ -219,15 +219,6 @@ def normalize_mineru(middle: dict[str, Any], document_id: str, folder: Path,
             inline_latex = _inline_equations(source.get("content", []))
             if inline_latex:
                 block.recognition = {"inlineLatex": inline_latex, "provider": "mineru_basic"}
-                if box:
-                    filename = f"inline_original_{block.id}.png"
-                    original = pdfium.PdfDocument(str(pdf_path))
-                    try:
-                        if _crop(original, page_no, box, folder / "assets" / filename):
-                            block.src = f"/api/documents/{document_id}/assets/{filename}"
-                            block.source = "pdf_original_paragraph"
-                    finally:
-                        original.close()
             current.blocks.append(block)
     if not title or not any(section.type == "body" for section in sections):
         raise ValueError("MinerU result lacks a title or body sections.")

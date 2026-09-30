@@ -53,7 +53,7 @@ def _children(element: ET.Element | None, name: str) -> list[ET.Element]:
 def _heading_without_number(text: str) -> str:
     value = _repair_heading(text)
     for _ in range(3):
-        unnumbered = re.sub(r"^(?:[IVXLCDM]+[.)]?|\d+(?:\.\d+)*[.)]?|[A-Z][.)])\s+", "", value, flags=re.I)
+        unnumbered = re.sub(r"^(?:[IVXLCDM]+[.)]|\d+(?:\.\d+)*[.)]?|[A-Z][.)])\s+", "", value)
         if unnumbered == value:
             break
         value = _repair_heading(unnumbered)
@@ -917,6 +917,11 @@ def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] 
         if reference.preview and _compact_text(reference.preview) == _compact_text(reference.title):
             reference.preview = ""
 
+    # Uncaptioned marks smaller than a printed icon are page decoration, not figures.
+    for section in sections:
+        section.blocks = [block for block in section.blocks if not (
+            block.type == "figure" and block.id not in protected_block_ids and not block.caption
+            and block.bbox and block.bbox.get("width", 0) < 24 and block.bbox.get("height", 0) < 24)]
     blocks = {block.id: block for section in sections for block in section.blocks}
     if document_dir and any(block.type == "equation" and not block.text for block in blocks.values()):
         pdf_path = document_dir / "original.pdf"
@@ -939,14 +944,15 @@ def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] 
     for block in blocks.values():
         if block.type == "list":
             block.items = [_list_item_without_marker(item) for item in block.items]
-        if block.type == "paragraph" and block.src and block.source != "pdf_original_paragraph" and (block.text or block.content):
+        if block.type == "paragraph" and block.src and (block.text or block.content):
             block.src = None
         if block.type == "equation":
             block.text = _formula_without_number(block.text, block.number) or "公式未能识别"
         if block.type in {"figure", "table"} and block.caption:
             block.captionContent = _numbered_citations(block.caption, model.references)
-    model.figures = [blocks.get(figure.id, figure) for figure in model.figures]
-    model.tables = [blocks.get(table.id, table) for table in model.tables]
+    model.figures = sorted((blocks[figure.id] for figure in model.figures if figure.id in blocks),
+                           key=lambda figure: (figure.number is None, figure.number or 0))
+    model.tables = [blocks[table.id] for table in model.tables if table.id in blocks]
     _renumber_sections(sections)
     for order, block in enumerate(block for section in sections for block in section.blocks):
         block.order = order

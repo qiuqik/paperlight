@@ -21,8 +21,7 @@ services:
       PAPERLIGHT_LIBRARY_DIR: /userdata/library
       PAPERLIGHT_RESULT_DIR: /result
       PAPERLIGHT_REFERENCE_MODE: ${PAPERLIGHT_REFERENCE_MODE:-auto}
-      PAPERLIGHT_PDF_PARSER: mineru
-      PAPERLIGHT_MINERU_URL: http://mineru:8001
+      PAPERLIGHT_PDF_PARSER: docling
       PAPERLIGHT_DEEPSEEK_API_KEY: ${PAPERLIGHT_DEEPSEEK_API_KEY:-}
       PAPERLIGHT_DOUBAO_API_KEY: ${PAPERLIGHT_DOUBAO_API_KEY:-}
       PAPERLIGHT_DOUBAO_VISION_MODEL: ${PAPERLIGHT_DOUBAO_VISION_MODEL:-}
@@ -35,9 +34,9 @@ services:
       - docling-model-cache:/models
     depends_on:
       - grobid
-      - mineru
     restart: unless-stopped
   mineru:
+    profiles: ["mineru"]
     build:
       context: ./backend
       dockerfile: Dockerfile.mineru
