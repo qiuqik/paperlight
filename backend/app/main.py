@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from .accounts import AccountStore
 from .model import DOCUMENT_MODEL_VERSION, DocumentModel, ProcessingStatus
 from .arxiv_html import parse_arxiv_html
-from .arxiv_source import ArxivSource, fetch_pinned_pdf, official_get, resolve_arxiv_url
+from .arxiv_source import ArxivSource, fetch_pinned_pdf, official_get
 from .normalizer import finalize_document_model
 from .pdf_pipeline import parse_pdf
 from .vision import configured_provider, transcribe_file
@@ -414,38 +414,6 @@ async def create_document(background_tasks: BackgroundTasks, file: UploadFile = 
                  filename=filename, createdAt=time.time(), fingerprint=fingerprint, sourceKind="pdf_upload")
     background_tasks.add_task(_process_document, document_id, filename)
     return ProcessingStatus(documentId=document_id, status="processing", stage="queued", progress=0.02)
-
-
-@app.post("/api/documents/arxiv", response_model=ProcessingStatus, status_code=202)
-def import_arxiv(background_tasks: BackgroundTasks, request: dict[str, Any]) -> ProcessingStatus:
-    user = _user()
-    url = request.get("url")
-    if not isinstance(url, str) or len(url) > 300:
-        raise HTTPException(status_code=422, detail="请输入 arXiv 论文链接。")
-    try:
-        with httpx.Client(headers={"User-Agent": "Paperlight/0.3"}, timeout=20) as client:
-            source = resolve_arxiv_url(url, client)
-    except (httpx.HTTPError, ValueError) as error:
-        raise HTTPException(status_code=422, detail=str(error)[:300]) from error
-    fingerprint = hashlib.sha256(f"arxiv:{source.versioned_id}".encode()).hexdigest()
-    with import_lock:
-        existing = ACCOUNTS.find_document(user["id"], fingerprint)
-        if existing and (status := _get_job(existing["id"])) and status.get("status") in {"processing", "ready"}:
-            if status["status"] == "ready":
-                return get_document(existing["id"])
-            return ProcessingStatus(**status)
-        document_id = uuid.uuid4().hex
-        folder = DATA_DIR.parent / "users" / user["id"] / "documents" / document_id
-        folder.mkdir(parents=True, exist_ok=False)
-        filename = f"{source.versioned_id}.pdf"
-        ACCOUNTS.add_document(document_id, user["id"], fingerprint, filename,
-                              f"users/{user['id']}/documents/{document_id}")
-        _set_job(document_id, documentId=document_id, status="processing", stage="queued", progress=.02,
-                 filename=filename, createdAt=time.time(), fingerprint=fingerprint, sourceKind="arxiv",
-                 sourceUrl=source.submitted_url, arxivId=source.arxiv_id, arxivVersion=source.version)
-    background_tasks.add_task(_process_document, document_id, filename)
-    return ProcessingStatus(documentId=document_id, status="processing", stage="queued", progress=.02,
-                            sourceUrl=source.submitted_url, arxivId=source.arxiv_id, arxivVersion=source.version)
 
 
 def _read_annotations(folder: Path) -> list[dict[str, Any]]:

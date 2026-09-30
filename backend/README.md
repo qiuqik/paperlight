@@ -1,6 +1,6 @@
 # Paperlight parser API
 
-The parser runs inside the root Docker Compose stack and is reached through the Next.js `/api/parser` proxy. PDF uploads use Docling, optional GROBID, and original-PDF geometry to produce a normalized `DocumentModel`. arXiv links are pinned to a version and parsed from official HTML; missing or incomplete HTML falls back to the pinned PDF. OCR runs automatically only when Docling finds a mostly empty text layer; set `PAPERLIGHT_OCR_MODE=always` or `never` to override this behavior.
+The parser runs inside the root Docker Compose stack and is reached through the Next.js `/api/parser` proxy. New imports accept PDF uploads and use Docling, optional GROBID, and original-PDF geometry to produce a normalized `DocumentModel`. The arXiv-link import route is retired; saved arXiv documents remain readable. OCR runs automatically only when Docling finds a mostly empty text layer; set `PAPERLIGHT_OCR_MODE=always` or `never` to override this behavior.
 
 ## Start the full stack on Windows
 
@@ -45,7 +45,6 @@ Use a different installed Python version in the first command if needed. Docling
 ## API
 
 - `POST /api/documents/import` (also `/api/documents` and `/parser/jobs`) — multipart field `file`, returns a processing document ID.
-- `POST /api/documents/arxiv` — JSON `{"url":"https://arxiv.org/abs/2603.17965v1"}`; resolves and stores the exact version before processing.
 - `GET /api/documents/{id}` (also `/parser/jobs/{id}`) — processing stage or the normalized document JSON.
 - `GET /api/documents/{id}/model` — the normalized document; returns 409 until parsing succeeds.
 - `DELETE /api/documents/{id}` — removes a finished document and its debug snapshot; returns 409 while parsing is active.

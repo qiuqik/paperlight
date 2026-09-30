@@ -15,6 +15,35 @@ from backend.scripts.repair_list_geometry import repair as repair_list_geometry
 
 
 class GeometryTests(unittest.TestCase):
+    def test_adjacent_title_lines_do_not_become_contents_sections(self) -> None:
+        def entry(label: str, text: str, top: float, bottom: float):
+            box = SimpleNamespace(l=90, r=530, t=top, b=bottom, coord_origin="BOTTOMLEFT")
+            return SimpleNamespace(label=SimpleNamespace(value=label), text=text,
+                                   prov=[SimpleNamespace(page_no=1, bbox=box)])
+
+        items = [entry("section_header", "The Urban Toolkit:", 733, 717),
+                 entry("section_header", "A Grammar-based Framework for Urban Visual Analytics", 711, 695),
+                 entry("text", "Gustavo Moreira and Maryam Hosseini", 679, 665),
+                 entry("section_header", "1 Introduction", 480, 465),
+                 entry("text", "Body text.", 450, 430)]
+        doc = SimpleNamespace(iterate_items=lambda: ((item, 0) for item in items),
+                              texts=[], pictures=[], pages={1: None})
+        core = ModuleType("docling_core")
+        core.__path__ = []
+        types = ModuleType("docling_core.types")
+        types.__path__ = []
+        doc_types = ModuleType("docling_core.types.doc")
+        doc_types.PictureItem = type("PictureItem", (), {})
+        doc_types.TableItem = type("TableItem", (), {})
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(sys.modules, {
+            "docling_core": core, "docling_core.types": types, "docling_core.types.doc": doc_types,
+        }):
+            model = normalize_docling(doc, "paper", Path(temp_dir))
+
+        self.assertEqual(model.metadata.title,
+                         "The Urban Toolkit: A Grammar-based Framework for Urban Visual Analytics")
+        self.assertEqual([section.title for section in model.sections], ["1 Introduction"])
+
     def test_saved_model_cleanup_removes_author_roster_links_captions_and_deduplicates_references(self) -> None:
         figure = Block(id="figure-1", type="figure", page=1, caption="Comparison with prior work [2] and [3].",
                        bbox={"x": 30, "y": 120, "width": 460, "height": 120})

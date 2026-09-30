@@ -1093,6 +1093,7 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
                     break
 
     seen_first_page_title = False
+    title_tail_bottom: float | None = None
     abstract_heading_locations = [
         candidate.prov[0].bbox for candidate in getattr(docling_doc, "texts", []) or []
         if getattr(getattr(candidate, "label", None), "value", "").lower() == "section_header"
@@ -1225,7 +1226,19 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             if not title and not seen_first_page_title and not re.match(r"^(?:[IVXLCDM]+\.|\d+(?:\.\d+)*\s)", text):
                 title = text
                 seen_first_page_title = True
+                if _page_no(item) == 1 and location is not None and getattr(location, "bbox", None):
+                    title_tail_bottom = float(location.bbox.b)
                 current = None
+                continue
+            if (seen_first_page_title and title_tail_bottom is not None and not sections and _page_no(item) == 1
+                    and location is not None and getattr(location, "bbox", None)
+                    and -2 <= title_tail_bottom - float(location.bbox.t) <= 24
+                    and not re.match(r"^(?:[IVXLCDM]+\.|\d+(?:\.\d+)*\s)", text)
+                    and not re.fullmatch(r"(?:Abstract|Introduction|Index Terms|Keywords)", text, re.I)):
+                # Docling may split a centered, two-line paper title into
+                # consecutive section headers. Keep it out of the contents.
+                title = f"{title.rstrip()} {text.lstrip()}"
+                title_tail_bottom = float(location.bbox.b)
                 continue
             if title and text.casefold() == title.casefold():
                 continue
