@@ -11,6 +11,9 @@ function renderedLatex(latex: string, displayMode: boolean) {
   else if (expression.startsWith('\\[') && expression.endsWith('\\]')) expression = expression.slice(2, -2).trim();
   else if (expression.startsWith('$$') && expression.endsWith('$$')) expression = expression.slice(2, -2).trim();
   else if (expression.startsWith('$') && expression.endsWith('$')) expression = expression.slice(1, -1).trim();
+  // The reader positions equation numbers itself. A model may transcribe the
+  // printed number as \tag{...}; KaTeX's own tag then overlaps the equation.
+  if (displayMode) expression = expression.replace(/(?:\\tag\*?\s*\{[^{}]*\}\s*)+$/, '').trim();
   try { return katex.renderToString(expression, {displayMode, throwOnError: true, trust: false, output: 'htmlAndMathml'}); }
   catch { return undefined; }
 }
