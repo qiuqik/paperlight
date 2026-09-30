@@ -6,7 +6,7 @@ import base64
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import BoundedSemaphore
 from typing import Any, Protocol
@@ -32,7 +32,7 @@ class ChatVisionProvider:
     name: str
     model: str
     url: str
-    key: str
+    key: str = field(repr=False)
 
     def transcribe(self, image: bytes) -> str:
         if len(image) > 8_000_000:
@@ -64,12 +64,13 @@ class ChatVisionProvider:
 
 def configured_provider() -> VisionProvider | None:
     """Only known image-capable models are allowed; keys never reach the browser."""
-    deepseek = os.environ.get("PAPERLIGHT_DEEPSEEK_API_KEY", "")
+    deepseek = os.environ.get("PAPERLIGHT_DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_APIKEY", "")
     if deepseek:
         return ChatVisionProvider("deepseek", "deepseek-flash", "https://api.deepseek.com/chat/completions", deepseek)
-    doubao = os.environ.get("PAPERLIGHT_DOUBAO_API_KEY", "")
-    model = os.environ.get("PAPERLIGHT_DOUBAO_VISION_MODEL", "")
-    if doubao and re.fullmatch(r"doubao-[A-Za-z0-9-]*vision[A-Za-z0-9-]*", model, re.I):
+    doubao = os.environ.get("PAPERLIGHT_DOUBAO_API_KEY") or os.environ.get("Doubao_APIKEY", "")
+    model = os.environ.get("PAPERLIGHT_DOUBAO_VISION_MODEL") or os.environ.get("Doubao_Model_id", "")
+    if doubao and (re.fullmatch(r"doubao-[A-Za-z0-9-]*vision[A-Za-z0-9-]*", model, re.I)
+                   or re.fullmatch(r"doubao-seed-2-0-(?:lite|mini)-\d{6}", model, re.I)):
         return ChatVisionProvider("doubao", model, "https://ark.cn-beijing.volces.com/api/v3/chat/completions", doubao)
     return None
 

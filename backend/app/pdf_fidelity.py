@@ -6,11 +6,92 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .model import Block, DocumentModel
+from .model import Block, DocumentModel, InlineNode
 
 
 MATH_FONT = re.compile(r"(?:math|cmmi|cmsy|msbm|symbol|stix|mt2|euler)", re.I)
 MATH_GLYPH = re.compile(r"[α-ωΑ-Ω∑∫∂∇≈≤≥≠∈⊂⊕⊗∀∃√∞₀-₉⁰-⁹]")
+
+
+def _inline_candidate(text: str) -> bool:
+    text = text.strip()
+    if len(text) < 4 or re.search(r"[=+−\-*/∈<{,]$", text):
+        return False
+    if any(text.count(left) != text.count(right) for left, right in (("(", ")"), ("{", "}"), ("[", "]"))):
+        return False
+    return bool(re.search(r"[A-Za-zα-ωΑ-Ω]", text) and re.search(r"[=+−*/|∈<>()[\]{}₀-₉⁰-⁹]", text))
+
+
+def recover_inline_pdf_formulas(model: DocumentModel, pdf_path: Path, folder: Path, limit: int = 8,
+                                protected_block_ids: set[str] | None = None) -> int:
+    """Crop only math-font runs that align exactly with a paragraph substring.
+
+    Ambiguous symbols and runs crossing a text line are left as extracted text.
+    The crop is the reading source; later vision output is a separate transcript.
+    """
+    try:
+        import pymupdf
+        import pypdfium2 as pdfium
+    except ImportError:
+        return 0
+    protected = protected_block_ids or set()
+    paragraphs = [block for section in model.sections for block in section.blocks
+                  if block.type == "paragraph" and block.page and block.bbox and len(block.text) >= 35
+                  and block.id not in protected
+                  and (not block.content or all(node.type == "text" for node in block.content))]
+    count = 0
+    with pymupdf.open(pdf_path) as geometry:
+        raster = pdfium.PdfDocument(str(pdf_path))
+        try:
+            for page_number, page in enumerate(geometry, start=1):
+                if count >= limit:
+                    break
+                for pdf_block in page.get_text("dict")["blocks"]:
+                    for line in pdf_block.get("lines", []):
+                        spans = line.get("spans", [])
+                        run: list[dict] = []
+                        for index in range(len(spans) + 1):
+                            span = spans[index] if index < len(spans) else None
+                            font = span.get("font", "") if span else ""
+                            math = bool(span and (MATH_FONT.search(font) or re.search(r"\bCMR\d|\bCMBX\d", font, re.I)))
+                            if math:
+                                run.append(span)
+                                continue
+                            if run:
+                                original = "".join(item["text"] for item in run).strip()
+                                strong = any(MATH_FONT.search(item["font"]) for item in run)
+                                prose = any(len(item["text"].strip()) >= 8 and not MATH_FONT.search(item["font"])
+                                            for item in spans[:index - len(run)] + spans[index:])
+                                if (strong and prose and 2 <= len(run) and len(original) <= 65
+                                        and _inline_candidate(original) and count < limit):
+                                    top = min(item["bbox"][1] for item in run)
+                                    bottom = max(item["bbox"][3] for item in run)
+                                    prose_spans = [item for item in spans if item not in run and len(item["text"].strip()) >= 8]
+                                    baseline = sorted(item["origin"][1] for item in run)[len(run) // 2]
+                                    if prose_spans and max(item["origin"][1] for item in run) - baseline < 1:
+                                        bottom = min(bottom, min(item["bbox"][3] for item in prose_spans) + .5)
+                                    left = min(item["bbox"][0] for item in run)
+                                    right = max(item["bbox"][2] for item in run)
+                                    owners = [block for block in paragraphs if block.page == page_number and block.bbox
+                                              and block.bbox["x"] - 3 <= left and block.bbox["x"] + block.bbox["width"] + 3 >= right
+                                              and block.bbox["y"] - 3 <= top and block.bbox["y"] + block.bbox["height"] + 3 >= bottom
+                                              and block.text.count(original) == 1 and not any(node.type == "inlineEquation" for node in block.content)]
+                                    if len(owners) == 1:
+                                        owner = owners[0]
+                                        start = owner.text.index(original)
+                                        box = {"x": left, "y": top, "width": right - left, "height": bottom - top}
+                                        asset = folder / "assets" / f"inline_{owner.id}.png"
+                                        if _crop(raster, page_number, box, asset, margin=0):
+                                            owner.content = [InlineNode(type="text", text=owner.text[:start]),
+                                                             InlineNode(type="inlineEquation", text=original,
+                                                                        src=f"/api/documents/{model.id}/assets/{asset.name}",
+                                                                        source="pdf_original_crop"),
+                                                             InlineNode(type="text", text=owner.text[start + len(original):])]
+                                            count += 1
+                                run = []
+        finally:
+            raster.close()
+    return count
 
 
 def _overlaps(first: dict[str, float], second: tuple[float, float, float, float]) -> bool:
@@ -18,15 +99,15 @@ def _overlaps(first: dict[str, float], second: tuple[float, float, float, float]
     return min(first["x"] + first["width"], right) > max(first["x"], left) and min(first["y"] + first["height"], bottom) > max(first["y"], top)
 
 
-def _crop(pdf: Any, page_number: int, box: dict[str, float], target: Path) -> bool:
+def _crop(pdf: Any, page_number: int, box: dict[str, float], target: Path, margin: float = 2) -> bool:
     try:
         page = pdf[page_number - 1]
         width, height = page.get_size()
         scale = 2.5
-        left = max(0, box["x"] - 2)
-        top = max(0, box["y"] - 2)
-        right = min(width, box["x"] + box["width"] + 2)
-        bottom = min(height, box["y"] + box["height"] + 2)
+        left = max(0, box["x"] - margin)
+        top = max(0, box["y"] - margin)
+        right = min(width, box["x"] + box["width"] + margin)
+        bottom = min(height, box["y"] + box["height"] + margin)
         if right <= left or bottom <= top:
             return False
         image = page.render(scale=scale, crop=(left, height - bottom, width - right, top)).to_pil()
@@ -147,6 +228,68 @@ def recover_missing_pdf_figures(model: DocumentModel, pdf_path: Path, folder: Pa
         finally:
             raster.close()
     return recovered
+
+
+def attach_pdf_figure_captions(model: DocumentModel, pdf_path: Path) -> int:
+    """Pair an existing uncaptioned visual with a numbered caption below it.
+
+    A page can contain several columns and figures, so require horizontal
+    overlap and a short vertical gap. Keep an unpaired visual unnumbered.
+    """
+    try:
+        import pymupdf
+    except ImportError:
+        return 0
+    from .normalizer import _numbered_citations, clean_text
+
+    used = {figure.number for figure in model.figures if figure.number is not None}
+    attached = 0
+    with pymupdf.open(pdf_path) as pdf:
+        for page_index, page in enumerate(pdf):
+            for entry in page.get_text("blocks"):
+                caption = clean_text(entry[4])
+                match = re.match(r"^Fig(?:ure)?\.?\s*(\d+)\s*[:.]\s*(.+)", caption, re.I)
+                if not match:
+                    continue
+                number = int(match.group(1))
+                if number in used:
+                    continue
+                candidates = []
+                for figure in model.figures:
+                    box = figure.bbox
+                    if figure.page != page_index + 1 or figure.number is not None or not box:
+                        continue
+                    gap = entry[1] - (box["y"] + box["height"])
+                    overlap = max(0, min(entry[2], box["x"] + box["width"]) - max(entry[0], box["x"]))
+                    if -3 <= gap <= 35 and overlap >= min(entry[2] - entry[0], box["width"]) * .35:
+                        candidates.append((gap, figure))
+                if len(candidates) != 1:
+                    continue
+                figure = candidates[0][1]
+                old_id = figure.id
+                body = match.group(2)
+                for block in [figure, *(block for section in model.sections for block in section.blocks if block.id == old_id)]:
+                    block.id = f"figure-{number}"
+                    block.number = number
+                    block.label = f"Figure {number}"
+                    block.caption = body
+                    block.captionContent = _numbered_citations(body, model.references)
+                used.add(number)
+                attached += 1
+    return attached
+
+
+def remove_unlabeled_pdf_decoration(model: DocumentModel, protected_block_ids: set[str] | None = None) -> int:
+    """Exclude narrow margin marks and tiny icons from the figure collection."""
+    protected = protected_block_ids or set()
+    discard = {figure.id for figure in model.figures if figure.id not in protected and not figure.caption
+               and figure.bbox and (figure.bbox["width"] < 24 or figure.bbox["height"] < 24)}
+    if not discard:
+        return 0
+    model.figures = [figure for figure in model.figures if figure.id not in discard]
+    for section in model.sections:
+        section.blocks = [block for block in section.blocks if block.id not in discard]
+    return len(discard)
 
 
 def merge_split_pdf_figures(model: DocumentModel, pdf_path: Path, folder: Path) -> int:

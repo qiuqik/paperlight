@@ -13,7 +13,7 @@ export type Section = {id: string; title: string; level: number; type?: string; 
 export type Reference = {id: string; number: number; authors: string; title: string; venue?: string; year?: number; doi?: string; preview?: string};
 export type PageGeometry = {number: number; width: number; height: number};
 export type DocumentModel = {
-  id: string; modelVersion?: number; fingerprint?: string; metadata: {title: string; authors: string[]; pageCount: number; readMinutes?: number; venue?: string; year?: number};
+  id: string; modelVersion?: number; fingerprint?: string; metadata: {title: string; authors: string[]; affiliations?: string[]; authorNotes?: string[]; pageCount: number; readMinutes?: number; venue?: string; year?: number};
   sections: Section[]; references: Reference[]; figures: Block[]; tables: Block[]; pages?: PageGeometry[];
   source?: string; sourceUrl?: string; arxivId?: string; arxivVersion?: number; fallbackReason?: string;
 };

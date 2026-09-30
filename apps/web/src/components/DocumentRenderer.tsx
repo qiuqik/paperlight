@@ -1,5 +1,6 @@
 'use client';
-import {useEffect, useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
+import {createPortal} from 'react-dom';
 import katex from 'katex';
 import type {Annotation, Block, DocumentModel, InlineNode, PageGeometry, Section} from '@/lib/document';
 import {isTextAnchor} from '@/lib/document';
@@ -16,10 +17,16 @@ function MathExpression({latex, mathml, text, src, displayMode = false, preferOr
   return <span className="math-fallback">{text || '公式未能识别'}</span>;
 }
 
+function InlineFormula({node, pdfUrl}: {node: InlineNode; pdfUrl?: string}) {
+  const [showLatex, setShowLatex] = useState(false);
+  const expression = <MathExpression latex={node.latex} mathml={node.mathml} src={showLatex ? undefined : node.src} text={node.text || node.display} preferOriginal={!showLatex && !!pdfUrl} />;
+  return <span className="embedded-equation">{node.src && !showLatex ? <ZoomableImage src={node.src} label="行内公式" className="inline-image-open">{expression}</ZoomableImage> : expression}{node.src && node.latex && <button className="formula-original" type="button" title="模型转写可能有误，请与原 PDF 核对" onClick={() => setShowLatex(value => !value)}>{showLatex ? '原图' : 'LaTeX 转写'}</button>}{pdfUrl && <a className="formula-original" href={pdfUrl} target="_blank" rel="noreferrer" title="查看原 PDF 中的公式">原文</a>}{node.number != null && <span className="equation-number">({node.number})</span>}</span>;
+}
+
 function Inline({nodes, onReference, pdfUrl}: {nodes: InlineNode[]; onReference: (id: string) => void; pdfUrl?: string}) {
   return <>{nodes.map((node, index) => {
     const label = node.display || node.text || '';
-    if (node.type === 'inlineEquation') return <span className="embedded-equation" key={index}><MathExpression latex={node.latex} mathml={node.mathml} src={node.src} text={node.text || node.display} preferOriginal={!!pdfUrl} />{pdfUrl && <a className="formula-original" href={pdfUrl} target="_blank" rel="noreferrer" title="查看原 PDF 中的公式">原文</a>}{node.number != null && <span className="equation-number">({node.number})</span>}</span>;
+    if (node.type === 'inlineEquation') return <InlineFormula node={node} pdfUrl={pdfUrl} key={index} />;
     if (node.type === 'citation') return <button className="inline-link" key={index} onClick={() => node.referenceIds?.[0] && onReference(node.referenceIds[0])}>{label}</button>;
     if (node.type === 'figureLink' || node.type === 'tableLink') return <button className="inline-link" key={index} onClick={() => document.getElementById(node.figureId || node.tableId || '')?.scrollIntoView({behavior: 'smooth'})}>{label}</button>;
     if (node.type === 'link' && /^https?:\/\//.test(node.href || '')) return <a key={index} href={node.href} target="_blank" rel="noreferrer">{label}</a>;
@@ -59,8 +66,30 @@ function AreaMarks({block, annotations, pages, surface = 'block'}: {block: Block
     return <span key={annotation.id} className="area-mark" style={{left: `${bbox.x * 100}%`, top: `${bbox.y * 100}%`, width: `${bbox.width * 100}%`, height: `${bbox.height * 100}%`, borderColor: annotation.color, backgroundColor: `${annotation.color}33`}} />;
   })}</>;
 }
+function ZoomableImage({src, label, className, children}: {src: string; label: string; className: string; children: React.ReactNode}) {
+  const [preview, setPreview] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [imageSize, setImageSize] = useState<{width: number; height: number} | null>(null);
+  const lightboxRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!preview) return;
+    const close = (event: KeyboardEvent) => {if (event.key === 'Escape') setPreview(false);};
+    const wheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      setZoom(value => Math.min(8, Math.max(.5, value * Math.exp(-event.deltaY * .008))));
+    };
+    window.addEventListener('keydown', close);
+    lightboxRef.current?.addEventListener('wheel', wheel, {passive: false});
+    const element = lightboxRef.current;
+    return () => {window.removeEventListener('keydown', close); element?.removeEventListener('wheel', wheel);};
+  }, [preview]);
+  const fit = imageSize && typeof window !== 'undefined' ? Math.min(1, (window.innerWidth - 72) / imageSize.width, (window.innerHeight - 120) / imageSize.height) : 1;
+  return <><button type="button" className={className} aria-label={`放大${label}`} onClick={() => {setZoom(1); setImageSize(null); setPreview(true);}}>{children}</button>{preview && createPortal(<div ref={lightboxRef} className="figure-lightbox" role="dialog" aria-modal="true" aria-label={`${label}图片预览`} onMouseDown={event => {if (event.target === event.currentTarget) setPreview(false);}}><div className="figure-lightbox-toolbar"><span>{label} · Ctrl + 滚轮或触控板缩放</span><button type="button" onClick={() => setZoom(value => Math.max(.5, value / 1.25))} aria-label="缩小">−</button><button type="button" onClick={() => setZoom(value => Math.min(8, value * 1.25))} aria-label="放大">＋</button><span>{Math.round(zoom * 100)}%</span><button type="button" onClick={() => setPreview(false)} aria-label="关闭">×</button></div><div className="figure-lightbox-scroll" onClick={() => setPreview(false)}><img src={src} alt={label} onLoad={event => setImageSize({width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight})} style={{width: imageSize ? `${Math.round(imageSize.width * fit * zoom)}px` : 'auto', maxWidth: imageSize ? 'none' : '100%'}} /></div></div>, document.body)}</>;
+}
 function AreaImage({block, annotations, pages, alt, className}: {block: Block; annotations: Annotation[]; pages: PageGeometry[]; alt: string; className?: string}) {
-  return <span className="area-surface"><img className={className} src={block.src} alt={alt} draggable={false} /><AreaMarks block={block} annotations={annotations} pages={pages} surface="image" /></span>;
+  const content = <><img className={className} src={block.src} alt={alt} draggable={false} /><AreaMarks block={block} annotations={annotations} pages={pages} surface="image" /></>;
+  return block.src ? <ZoomableImage src={block.src} label={alt} className="area-surface figure-open">{content}</ZoomableImage> : <span className="area-surface">{content}</span>;
 }
 function TableGrid({block, onReference}: {block: Block; onReference: (id: string) => void}) {
   if (!block.tableRows?.length) return <div className="table-scroll"><table><thead><tr>{(block.headers || []).map((cell, index) => <th key={index}>{typeof cell === 'string' ? cell : cell.text}</th>)}</tr></thead><tbody>{(block.rows || []).map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex}>{typeof cell === 'string' ? cell : cell.text}</td>)}</tr>)}</tbody></table></div>;
@@ -87,7 +116,7 @@ function EquationBlock({block, annotations, pages, pdfUrl, documentId}: {block: 
     } catch (error) {setMessage(error instanceof Error ? error.message : '保存失败');}
   };
   return <figure data-block-id={block.id} data-page={block.page} className={`paper-equation area-target${block.number != null ? ' numbered-equation' : ''}`}>
-    <MathExpression latex={latex} mathml={block.mathml} src={block.src} text={block.text} displayMode preferOriginal={!!pdfUrl} />
+    {block.src ? <ZoomableImage src={block.src} label={`公式${block.number ? ` ${block.number}` : ''}`} className="formula-image-open"><MathExpression latex={latex} mathml={block.mathml} src={block.src} text={block.text} displayMode preferOriginal={!!pdfUrl} /></ZoomableImage> : <MathExpression latex={latex} mathml={block.mathml} text={block.text} displayMode preferOriginal={!!pdfUrl} />}
     {pdfUrl && <a className="formula-original" href={`${pdfUrl}#page=${block.page || 1}`} target="_blank" rel="noreferrer">查看原文</a>}
     {latex && <button className="formula-copy" type="button" title={pdfUrl ? '辅助转写，可能与原公式不一致' : '原始 TeX'} onClick={() => void navigator.clipboard.writeText(latex)}>复制 TeX</button>}
     {pdfUrl && <button className="formula-copy" type="button" onClick={() => {setDraft(latex); setEditing(value => !value); setMessage('');}}>修订转写</button>}
@@ -98,22 +127,12 @@ function EquationBlock({block, annotations, pages, pdfUrl, documentId}: {block: 
   </figure>;
 }
 function BlockView({block, annotations, pages, onReference, pdfUrl, documentId, prompt = false}: {block: Block; annotations: Annotation[]; pages: PageGeometry[]; onReference: (id: string) => void; pdfUrl?: string; documentId: string; prompt?: boolean}) {
-  const [preview, setPreview] = useState(false);
-  const [zoom, setZoom] = useState(1);
-  useEffect(() => {
-    if (!preview) return;
-    const closeOnEscape = (event: KeyboardEvent) => {if (event.key === 'Escape') setPreview(false);};
-    window.addEventListener('keydown', closeOnEscape);
-    return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [preview]);
-  const enlarge = block.src && <button type="button" className="figure-enlarge" onClick={() => {setZoom(1); setPreview(true);}}>放大查看</button>;
-  const lightbox = preview && block.src && <div className="figure-lightbox" role="dialog" aria-modal="true" aria-label={`${block.label || '论文图表'}放大查看`} onMouseDown={event => {if (event.target === event.currentTarget) setPreview(false);}}><div className="figure-lightbox-toolbar"><span>{block.label || '论文图表'}</span><button type="button" onClick={() => setZoom(value => Math.max(.5, value - .25))} aria-label="缩小">−</button><button type="button" onClick={() => setZoom(value => Math.min(4, value + .25))} aria-label="放大">＋</button><span>{Math.round(zoom * 100)}%</span><button type="button" onClick={() => setPreview(false)} aria-label="关闭">×</button></div><div className="figure-lightbox-scroll"><img src={block.src} alt={block.caption || block.label || '论文图表'} style={{width: `${zoom * 100}%`}} /></div></div>;
   const common = {'data-block-id': block.id, 'data-page': block.page};
   const originalPage = pdfUrl ? `${pdfUrl}#page=${block.page || 1}` : undefined;
   switch (block.type) {
     case 'paragraph': return <p {...common} className={`area-target${prompt && /^(?:[A-Z][A-Z\s()&-]{5,}|Step \d+\s*[—–-])/.test(block.text || '') ? ' prompt-label' : ''}`}>{block.content?.length ? <Inline nodes={block.content} onReference={onReference} pdfUrl={originalPage} /> : <PlainText text={block.text || ''} onReference={onReference} />}{block.source === 'pdf_original_paragraph' && originalPage && <a className="formula-original" href={originalPage} target="_blank" rel="noreferrer">查看原文</a>}<AreaMarks block={block} annotations={annotations} pages={pages} /></p>;
-    case 'figure': return <figure {...common} id={block.id} className="paper-figure area-target" onDragStart={event => event.preventDefault()}>{block.src && <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || block.label || '论文插图'} />}{enlarge}{lightbox}{block.source === 'arxiv_html_missing_visual' && <div className="source-notice">arXiv HTML 未提供这张图像。{block.sourceUrl && <a href={block.sourceUrl} target="_blank" rel="noreferrer">查看该版本的原 PDF</a>}</div>}<AreaMarks block={block} annotations={annotations} pages={pages} /><figcaption><strong>{block.label || `Figure ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption></figure>;
-    case 'table': return <figure {...common} id={block.id} className="paper-figure area-target scholarly-table-figure" onDragStart={event => event.preventDefault()}><figcaption><strong>{block.label || `Table ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption>{block.src ? <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || '论文表格'} /> : <TableGrid block={block} onReference={onReference} />}{enlarge}{lightbox}<AreaMarks block={block} annotations={annotations} pages={pages} /></figure>;
+    case 'figure': return <figure {...common} id={block.id} className="paper-figure area-target" onDragStart={event => event.preventDefault()}>{block.src && <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || block.label || '论文插图'} />}{block.source === 'arxiv_html_missing_visual' && <div className="source-notice">arXiv HTML 未提供这张图像。{block.sourceUrl && <a href={block.sourceUrl} target="_blank" rel="noreferrer">查看该版本的原 PDF</a>}</div>}<AreaMarks block={block} annotations={annotations} pages={pages} /><figcaption><strong>{block.label || `Figure ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption></figure>;
+    case 'table': return <figure {...common} id={block.id} className="paper-figure area-target scholarly-table-figure" onDragStart={event => event.preventDefault()}><figcaption><strong>{block.label || `Table ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption>{block.src ? <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || '论文表格'} /> : <TableGrid block={block} onReference={onReference} />}<AreaMarks block={block} annotations={annotations} pages={pages} /></figure>;
     case 'equation': return <EquationBlock block={block} annotations={annotations} pages={pages} pdfUrl={pdfUrl} documentId={documentId} />;
     case 'list': {const List = block.listOrdered ? 'ol' : 'ul'; return <div {...common} className="area-target"><List>{(block.items || []).map((item, index) => <li key={index}>{block.listContent?.[index]?.length ? <Inline nodes={block.listContent[index]} onReference={onReference} pdfUrl={originalPage} /> : item}</li>)}</List><AreaMarks block={block} annotations={annotations} pages={pages} /></div>;}
     case 'quote': return <blockquote {...common} className="area-target">{block.text}<AreaMarks block={block} annotations={annotations} pages={pages} /></blockquote>;
@@ -133,7 +152,7 @@ function SectionView({section, annotations, pages, onReference, pdfUrl, document
 export default function DocumentRenderer({document: paper, annotations, onReference}: {document: DocumentModel; annotations: Annotation[]; onReference: (id: string) => void}) {
   const pdfUrl = paper.source && paper.source !== 'arxiv_html' ? `/api/parser/api/documents/${paper.id}/original.pdf` : undefined;
   return <>
-    <header className="paper-header"><div className="eyebrow">{paper.arxivId ? `ARXIV · ${paper.arxivId}v${paper.arxivVersion} · ${paper.source === 'arxiv_html' ? '官方 HTML' : 'PDF 原文'}` : `PAPERLIGHT · ${paper.metadata.pageCount || '—'} PAGES`}</div><h1>{paper.metadata.title}</h1><p className="authors">{paper.metadata.authors.join(' · ')}</p>{paper.metadata.venue && <p className="venue">{paper.metadata.venue} {paper.metadata.year || ''}</p>}{paper.fallbackReason && <p className="source-notice">官方 HTML 不完整，已使用固定版本的 PDF。</p>}</header>
+    <header className="paper-header"><div className="eyebrow">{paper.arxivId ? `ARXIV · ${paper.arxivId}v${paper.arxivVersion} · ${paper.source === 'arxiv_html' ? '官方 HTML' : 'PDF 原文'}` : `PAPERLIGHT · ${paper.metadata.pageCount || '—'} PAGES`}</div><h1>{paper.metadata.title}</h1><p className="authors">{paper.metadata.authors.join(' · ')}</p>{(paper.metadata.affiliations?.length || paper.metadata.authorNotes?.length) ? <details className="paper-author-details"><summary>作者信息</summary>{paper.metadata.affiliations?.map((value, index) => <p key={`affiliation-${index}`}>{value}</p>)}{paper.metadata.authorNotes?.map((value, index) => <p key={`note-${index}`}>{value}</p>)}</details> : null}{paper.metadata.venue && <p className="venue">{paper.metadata.venue} {paper.metadata.year || ''}</p>}{paper.fallbackReason && <p className="source-notice">官方 HTML 不完整，已使用固定版本的 PDF。</p>}</header>
     {paper.sections.map(section => <SectionView key={section.id} section={section} annotations={annotations} pages={paper.pages || []} onReference={onReference} pdfUrl={pdfUrl} documentId={paper.id} arxivHtml={paper.source === 'arxiv_html'} />)}
   </>;
 }

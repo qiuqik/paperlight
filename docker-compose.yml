@@ -15,6 +15,9 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    env_file:
+      - path: ./backend/.env
+        required: false
     environment:
       GROBID_URL: http://grobid:8070
       PAPERLIGHT_DATA_DIR: /userdata/documents

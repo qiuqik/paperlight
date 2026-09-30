@@ -848,7 +848,8 @@ def _process_document(document_id: str, filename: str) -> None:
         ACCOUNTS.update_document(document_id, status="ready", title=model.metadata.title,
                                  authors=model.metadata.authors, page_count=model.metadata.pageCount)
         timings["totalSeconds"] = round(time.perf_counter() - started, 2)
-        has_equations = any(block.type == "equation" for section in model.sections for block in section.blocks)
+        has_equations = any(block.type == "equation" and block.src or any(node.type == "inlineEquation" and node.src for node in block.content)
+                            for section in model.sections for block in section.blocks)
         recognize = parse_source != "arxiv_html" and bool(configured_provider()) and has_equations
         _set_job(document_id, status="ready", stage="ready", progress=1.0, timings=timings,
                  parseSource=parse_source, fallbackReason=fallback_reason,
@@ -883,23 +884,28 @@ def _enrich_formulas(document_id: str) -> None:
         model = DocumentModel(**json.loads(path.read_text(encoding="utf-8")))
         evidence_path = folder / "formula-recognitions.json"
         evidence = json.loads(evidence_path.read_text(encoding="utf-8")) if evidence_path.is_file() else {}
-        candidates = [block for section in model.sections for block in section.blocks if block.type == "equation" and block.src]
+        inline_candidates = [(f"{block.id}:inline:{index}", node.src) for section in model.sections
+                             for block in section.blocks for index, node in enumerate(block.content)
+                             if node.type == "inlineEquation" and node.src]
+        display_candidates = [(block.id, block.src) for section in model.sections for block in section.blocks
+                              if block.type == "equation" and block.src]
+        candidates = inline_candidates[:8] + display_candidates[:12]
         failures = 0
-        for block in candidates[:12]:
-            if block.id in evidence:
+        for key, source in candidates:
+            if key in evidence:
                 continue
-            asset = folder / "assets" / Path(block.src or "").name
+            asset = folder / "assets" / Path(source or "").name
             if not asset.is_file():
                 continue
             try:
                 record = transcribe_file(provider, asset)
                 with formula_data_lock:
                     current = json.loads(evidence_path.read_text(encoding="utf-8")) if evidence_path.is_file() else {}
-                    current[block.id] = {**record, **current.get(block.id, {})}
+                    current[key] = {**record, **current.get(key, {})}
                     _atomic_json(evidence_path, current)
             except (httpx.HTTPError, OSError, ValueError, RuntimeError):
                 failures += 1
-                logger.exception("Vision transcription failed for %s/%s", document_id, block.id)
+                logger.exception("Vision transcription failed for %s/%s", document_id, key)
         if not ACCOUNTS.document(document_id):
             return
         with formula_data_lock:
@@ -910,6 +916,11 @@ def _enrich_formulas(document_id: str) -> None:
                     if block.id in evidence:
                         block.recognition = evidence[block.id]
                         block.latex = evidence[block.id].get("revised") or evidence[block.id].get("rawOutput", "")
+                    for index, node in enumerate(block.content):
+                        record = evidence.get(f"{block.id}:inline:{index}")
+                        if record:
+                            node.latex = record.get("revised") or record.get("rawOutput", "")
+                            node.source = "pdf_crop_with_vision_transcript"
             _atomic_json(path, current_model.model_dump(mode="json"))
         state = _get_job(document_id) or {}
         timings = dict(state.get("timings") or {})

@@ -864,6 +864,20 @@ def _prompt_code_lines(block: Block, document_dir: Path | None) -> list[str]:
                      and re.match(r"^(?:You are |Your task is |You will receive |Act as )", lines[1], re.I)) else []
 
 
+def remove_tiny_diagram_text(model: DocumentModel, protected_block_ids: set[str] | None = None) -> int:
+    """Discard diagram microtype mistakenly emitted as article paragraphs."""
+    protected = protected_block_ids or set()
+    removed = 0
+    for section in model.sections:
+        before = len(section.blocks)
+        section.blocks = [block for block in section.blocks if not (
+            block.type == "paragraph" and block.id not in protected
+            and block.bbox and block.bbox.get("height", 100) < 5
+            and block.page is not None)]
+        removed += before - len(section.blocks)
+    return removed
+
+
 def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] | None = None,
                             document_dir: Path | None = None) -> DocumentModel:
     """Apply layout and citation cleanup to new and previously saved models."""
@@ -940,7 +954,7 @@ def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] 
     for section in sections:
         section.blocks = [block for block in section.blocks if not (
             block.type == "figure" and block.id not in protected_block_ids and not block.caption
-            and block.bbox and block.bbox.get("width", 0) < 24 and block.bbox.get("height", 0) < 24)]
+            and block.bbox and (block.bbox.get("width", 0) < 24 or block.bbox.get("height", 0) < 24))]
     captioned_figures = [block for section in sections for block in section.blocks
                          if block.type == "figure" and block.caption and block.bbox]
     def duplicate_figure(block: Block) -> bool:
@@ -958,6 +972,7 @@ def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] 
         return False
     for section in sections:
         section.blocks = [block for block in section.blocks if not duplicate_figure(block)]
+    remove_tiny_diagram_text(model, protected_block_ids)
     blocks = {block.id: block for section in sections for block in section.blocks}
     if document_dir and any(block.type == "equation" and not block.text for block in blocks.values()):
         pdf_path = document_dir / "original.pdf"

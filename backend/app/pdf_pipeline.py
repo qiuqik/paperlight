@@ -19,7 +19,8 @@ from .normalizer import extract_pdf_references, normalize_docling, parse_grobid
 from .mineru_normalizer import normalize_mineru
 from .pdf_fidelity import (merge_split_pdf_figures, recover_composite_pdf_figures,
                            recover_missing_pdf_figures, recover_pdf_table_captions, repair_overlapping_pdf_paragraphs,
-                           trim_abstract_figure_labels)
+                           trim_abstract_figure_labels, attach_pdf_figure_captions, recover_inline_pdf_formulas)
+from .pdf_frontmatter import repair_pdf_frontmatter
 
 
 @dataclass
@@ -142,12 +143,15 @@ def _parse_docling(pdf_path: Path, document_id: str, filename: str, folder: Path
     progress("normalizing_document", .9)
     normalizing = time.perf_counter()
     model = normalize_docling(document, document_id, folder, grobid_data, references)
+    timings["frontmatterCorrections"] = float(repair_pdf_frontmatter(model, pdf_path))
     timings["mergedFigures"] = float(merge_split_pdf_figures(model, pdf_path, folder))
+    timings["attachedFigureCaptions"] = float(attach_pdf_figure_captions(model, pdf_path))
     timings["recoveredFigures"] = float(recover_missing_pdf_figures(model, pdf_path, folder))
     timings["recoveredCompositeFigures"] = float(recover_composite_pdf_figures(model, pdf_path, folder))
     timings["recoveredTableCaptions"] = float(recover_pdf_table_captions(model, pdf_path))
     timings["trimmedAbstractLabels"] = float(trim_abstract_figure_labels(model, pdf_path))
     timings["repairedOverlappingParagraphs"] = float(repair_overlapping_pdf_paragraphs(model, pdf_path))
+    timings["inlineFormulaCrops"] = float(recover_inline_pdf_formulas(model, pdf_path, folder))
     model.figures.sort(key=lambda figure: (figure.number is None, figure.number or 0))
     for order, block in enumerate(block for section in model.sections for block in section.blocks):
         block.order = order
