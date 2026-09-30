@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import json
 import unicodedata
+from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -384,7 +385,7 @@ def _caption(doc: Any, item: Any, source_text: Any = None) -> str:
 
 def _caption_body(caption: str, kind: str, number: int) -> str:
     prefix = r"(?:fig(?:ure)?\.?)" if kind == "figure" else r"table"
-    return re.sub(rf"^\s*{prefix}\s*{number}\s*[.:]?\s*", "", caption, count=1, flags=re.I).strip()
+    return re.sub(rf"^\s*{prefix}\s*{number}(?:\.\d+)*\s*[.:]?\s*", "", caption, count=1, flags=re.I).strip()
 
 
 def _upsert_affiliation(affiliations: list[str], value: str) -> None:
@@ -868,6 +869,24 @@ def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] 
     """Apply layout and citation cleanup to new and previously saved models."""
     sections = model.sections
     protected_block_ids = protected_block_ids or set()
+    if any(re.fullmatch(r"Chapter\s+1", section.title, re.I) for section in sections):
+        abstract_index = next((index for index, section in enumerate(sections) if section.type == "abstract"), None)
+        if abstract_index is not None and abstract_index >= 3:
+            sections[:abstract_index] = [section for section in sections[:abstract_index]
+                                         if any(block.id in protected_block_ids for block in section.blocks)]
+        sections[:] = [section for section in sections
+                       if not (re.fullmatch(r"(?:Contents|List of Figures|List of Tables)", section.title, re.I)
+                               and not section.blocks)]
+        index = 0
+        while index + 1 < len(sections):
+            chapter = re.fullmatch(r"Chapter\s+(\d+)", sections[index].title, re.I)
+            if chapter and not sections[index].blocks and sections[index + 1].level == 1:
+                following = sections[index + 1]
+                following.title = f"{chapter.group(1)} {following.title}"
+                following.type = "body"
+                sections.pop(index)
+                continue
+            index += 1
     for section in list(sections):
         if not section.blocks or section.blocks[-1].id in protected_block_ids:
             continue
@@ -922,6 +941,23 @@ def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] 
         section.blocks = [block for block in section.blocks if not (
             block.type == "figure" and block.id not in protected_block_ids and not block.caption
             and block.bbox and block.bbox.get("width", 0) < 24 and block.bbox.get("height", 0) < 24)]
+    captioned_figures = [block for section in sections for block in section.blocks
+                         if block.type == "figure" and block.caption and block.bbox]
+    def duplicate_figure(block: Block) -> bool:
+        if block.type != "figure" or block.caption or not block.bbox or block.id in protected_block_ids:
+            return False
+        box = block.bbox
+        for figure in captioned_figures:
+            if figure.page != block.page or not figure.bbox:
+                continue
+            other = figure.bbox
+            overlap = max(0, min(box["x"] + box["width"], other["x"] + other["width"]) - max(box["x"], other["x"])) * max(
+                0, min(box["y"] + box["height"], other["y"] + other["height"]) - max(box["y"], other["y"]))
+            if overlap / max(1, min(box["width"] * box["height"], other["width"] * other["height"])) > .8:
+                return True
+        return False
+    for section in sections:
+        section.blocks = [block for block in section.blocks if not duplicate_figure(block)]
     blocks = {block.id: block for section in sections for block in section.blocks}
     if document_dir and any(block.type == "equation" and not block.text for block in blocks.values()):
         pdf_path = document_dir / "original.pdf"
@@ -999,6 +1035,27 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
     pdf_document = None
     text_pages: dict[int, Any] = {}
     figure_regions: dict[int, list[tuple[float, float, float, float]]] = {}
+    # Some publishers omit printed section numbers. Docling then reports every
+    # heading as level 1, although the PDF uses two consistent font sizes.
+    unnumbered_heights: Counter[float] = Counter()
+    numbered_heading_seen = False
+    for candidate in getattr(docling_doc, "texts", []) or []:
+        if getattr(getattr(candidate, "label", None), "value", "") != "section_header":
+            continue
+        heading_text = clean_text(getattr(candidate, "text", ""))
+        if re.match(r"^\d+(?:\.\d+)*\s+", heading_text):
+            numbered_heading_seen = True
+        elif (heading_text.casefold() not in {"abstract", "references", "acknowledgments"}
+              and len(heading_text) < 100):
+            provenance = getattr(candidate, "prov", None) or []
+            if provenance and getattr(provenance[0], "bbox", None):
+                box = provenance[0].bbox
+                unnumbered_heights[round(abs(float(box.t) - float(box.b)), 1)] += 1
+    style_threshold = None
+    if not numbered_heading_seen and len(unnumbered_heights) >= 2:
+        common = [height for height, count in unnumbered_heights.most_common() if count >= 2]
+        if len(common) >= 2 and abs(common[0] - common[1]) >= .6:
+            style_threshold = (common[0] + common[1]) / 2
     for picture in getattr(docling_doc, "pictures", []) or []:
         if not getattr(picture, "captions", None):
             continue
@@ -1294,10 +1351,17 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
                     intro_heading_box = (int(location.page_no), heading_box["y"])
             if is_appendix:
                 in_appendix = True
+            if re.fullmatch(r"Chapter\s+\d+", heading, re.I):
+                in_appendix = False
             section_type = "abstract" if is_abstract else "appendix" if in_appendix else "body"
             if sections and sections[-1].type == section_type and _heading_key(sections[-1].title) == _heading_key(heading):
                 sections.pop()
-            current = Section(id=f"section-{len(sections)+1}", title=heading, level=_heading_level(heading), type=section_type, blocks=[])
+            level = _heading_level(heading)
+            if style_threshold is not None and level == 1 and section_type == "body" and location is not None and getattr(location, "bbox", None):
+                height = abs(float(location.bbox.t) - float(location.bbox.b))
+                if height < style_threshold:
+                    level = 2
+            current = Section(id=f"section-{len(sections)+1}", title=heading, level=level, type=section_type, blocks=[])
             sections.append(current)
             if section_type == "body" and pending_figures:
                 current.blocks.extend(pending_figures)
@@ -1344,15 +1408,16 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             except Exception:
                 asset_name = ""
             caption = _caption(docling_doc, item, source_text)
-            number_match = re.search(r"(?:fig(?:ure)?\.?\s*)(\d+)", caption, re.I)
-            number = int(number_match.group(1)) if number_match else None
+            number_match = re.search(r"(?:fig(?:ure)?\.?\s*)(\d+(?:\.\d+)*)", caption, re.I)
+            number_token = number_match.group(1) if number_match else None
+            number = int(number_token.split(".")[0]) if number_token else None
             if number is not None:
                 caption = _caption_body(caption, "figure", number)
-            figure_id = f"figure-{number}" if number is not None else f"figure-auto-{figure_index}"
+            figure_id = f"figure-{number_token.replace('.', '-')}" if number_token else f"figure-auto-{figure_index}"
             if figure_id in used_figure_ids:
                 figure_id = f"{figure_id}-copy-{figure_index}"
             used_figure_ids.add(figure_id)
-            block = Block(id=figure_id, type="figure", number=number, label=f"Figure {number}" if number is not None else "Illustration", caption=caption, page=_page_no(item), src=f"/api/documents/{document_id}/assets/{asset_name}" if asset_name else None)
+            block = Block(id=figure_id, type="figure", number=number, label=f"Figure {number_token}" if number_token else "Illustration", caption=caption, page=_page_no(item), src=f"/api/documents/{document_id}/assets/{asset_name}" if asset_name else None)
             block.bbox = _block_bbox(location, pdf_document)
             if location is not None and getattr(location, "bbox", None):
                 figure_boxes[figure_id] = (int(location.page_no), float(location.bbox.l), float(location.bbox.b), float(location.bbox.r), float(location.bbox.t))
@@ -1368,11 +1433,12 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             if not _looks_like_table(headers, rows, caption):
                 continue
             table_index += 1
-            number_match = re.search(r"table\s*(\d+)", caption, re.I)
-            number = int(number_match.group(1)) if number_match else None
+            number_match = re.search(r"table\s*(\d+(?:\.\d+)*)", caption, re.I)
+            number_token = number_match.group(1) if number_match else None
+            number = int(number_token.split(".")[0]) if number_token else None
             if number is not None:
                 caption = _caption_body(caption, "table", number)
-            table_id = f"table-{number}" if number is not None else f"table-auto-{table_index}"
+            table_id = f"table-{number_token.replace('.', '-')}" if number_token else f"table-auto-{table_index}"
             if table_id in used_table_ids:
                 table_id = f"{table_id}-copy-{table_index}"
             used_table_ids.add(table_id)
@@ -1381,7 +1447,7 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             asset_path.parent.mkdir(parents=True, exist_ok=True)
             if not _render_picture_from_pdf(document_dir / "original.pdf", item, asset_path, margin=1):
                 asset_name = ""
-            block = Block(id=table_id, type="table", number=number, label=f"Table {number}" if number is not None else "Tabular content", caption=caption, page=_page_no(item), src=f"/api/documents/{document_id}/assets/{asset_name}" if asset_name else None, headers=headers, rows=rows)
+            block = Block(id=table_id, type="table", number=number, label=f"Table {number_token}" if number_token else "Tabular content", caption=caption, page=_page_no(item), src=f"/api/documents/{document_id}/assets/{asset_name}" if asset_name else None, headers=headers, rows=rows)
             block.bbox = _block_bbox(location, pdf_document)
             tables.append(block)
             if current:
@@ -1522,8 +1588,6 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             first_body.blocks[:0] = sorted(missing_assets, key=lambda block: (block.page or 1, block.id))
 
     _reposition_figures(sections, geometry, figure_boxes)
-
-    _renumber_sections(sections)
 
     for order, block in enumerate(block for section in sections for block in section.blocks):
         block.order = order

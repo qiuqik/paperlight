@@ -33,13 +33,13 @@ function Inline({nodes, onReference, pdfUrl}: {nodes: InlineNode[]; onReference:
   })}</>;
 }
 function PlainText({text, onReference}: {text: string; onReference: (id: string) => void}) {
-  return <>{text.split(/(\[\d+(?:\s*[,–-]\s*\d+)*\]|\b(?:Fig(?:ure)?\.?|Table)\s*\d+\b)/gi).map((part, index) => {
+  return <>{text.split(/(\[\d+(?:\s*[,–-]\s*\d+)*\]|\b(?:Fig(?:ure)?\.?|Table)\s*\d+(?:\.\d+)*\b)/gi).map((part, index) => {
     const citation = part.match(/^\[(\d+)\]$/);
     if (citation) return <button className="inline-link" key={index} onClick={() => onReference(citation[1])}>{part}</button>;
-    const figure = part.match(/^(?:Fig(?:ure)?\.?)\s*(\d+)$/i);
-    if (figure) return <button className="inline-link" key={index} onClick={() => document.getElementById(`figure-${figure[1]}`)?.scrollIntoView({behavior: 'smooth'})}>{part}</button>;
-    const table = part.match(/^Table\s*(\d+)$/i);
-    if (table) return <button className="inline-link" key={index} onClick={() => document.getElementById(`table-${table[1]}`)?.scrollIntoView({behavior: 'smooth'})}>{part}</button>;
+    const figure = part.match(/^(?:Fig(?:ure)?\.?)\s*(\d+(?:\.\d+)*)$/i);
+    if (figure) return <button className="inline-link" key={index} onClick={() => document.getElementById(`figure-${figure[1].replaceAll('.', '-')}`)?.scrollIntoView({behavior: 'smooth'})}>{part}</button>;
+    const table = part.match(/^Table\s*(\d+(?:\.\d+)*)$/i);
+    if (table) return <button className="inline-link" key={index} onClick={() => document.getElementById(`table-${table[1].replaceAll('.', '-')}`)?.scrollIntoView({behavior: 'smooth'})}>{part}</button>;
     return <span key={index}>{part}</span>;
   })}</>;
 }

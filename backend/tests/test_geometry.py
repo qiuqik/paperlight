@@ -97,6 +97,30 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual([item.id for item in cleaned.figures], ["figure-2"])
         self.assertIsNone(paragraph.src)
 
+    def test_uncaptioned_duplicate_is_removed_without_hiding_captioned_figure(self) -> None:
+        box = {"x": 50, "y": 70, "width": 240, "height": 120}
+        figure = Block(id="figure-1", type="figure", page=1, bbox=box, caption="Overview", src="/figure.png")
+        duplicate = Block(id="figure-auto-2", type="figure", page=1,
+                          bbox={"x": 52, "y": 72, "width": 236, "height": 116}, src="/duplicate.png")
+        model = DocumentModel(id="paper", metadata=Metadata(), sections=[
+            Section(id="intro", title="Introduction", blocks=[figure, duplicate])], figures=[figure, duplicate])
+        cleaned = finalize_document_model(model)
+        self.assertEqual([item.id for item in cleaned.figures], ["figure-1"])
+
+    def test_thesis_front_matter_and_chapter_markers_do_not_fill_contents(self) -> None:
+        model = DocumentModel(id="thesis", metadata=Metadata(), sections=[
+            Section(id="cover", title="Introduction", blocks=[Block(id="cover-text", type="paragraph", text="Degree details")]),
+            Section(id="committee", title="Thesis Committee"),
+            Section(id="author", title="Supervisor"),
+            Section(id="abstract", title="ABSTRACT", type="abstract", blocks=[Block(id="abstract-text", type="paragraph", text="Summary")]),
+            Section(id="contents", title="Contents", type="appendix"),
+            Section(id="chapter", title="Chapter 1", type="body"),
+            Section(id="intro", title="Introduction", type="body"),
+            Section(id="background", title="1.1 Background", level=2, type="body")])
+        cleaned = finalize_document_model(model)
+        self.assertEqual([section.title for section in cleaned.sections], [
+            "ABSTRACT", "1 Introduction", "1.1 Background"])
+
     def test_list_cleanup_removes_parser_bullet_from_saved_and_new_models(self) -> None:
         model = DocumentModel(id="paper", metadata=Metadata(), sections=[
             Section(id="intro", title="Introduction", blocks=[Block(id="findings", type="list", items=[
