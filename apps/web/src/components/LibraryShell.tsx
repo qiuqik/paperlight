@@ -4,14 +4,15 @@ import {useRouter} from 'next/navigation';
 import {readWorkspaceCache, writeWorkspaceCache} from '@/lib/workspaceCache';
 
 import {useCallback, useEffect, useRef, useState} from 'react';
-import {BookOpen, ChevronRight, Clock3, FileText, Grid2X2, List, Plus, Search, Settings2, Star, Trash2} from 'lucide-react';
+import {BookOpen, ChevronRight, Clock3, FileText, Grid2X2, List, MoreHorizontal, Plus, Search, Settings2, Star, Trash2} from 'lucide-react';
+import PaperTagsEditor, {PaperLabels, publicationTags, type PaperTags} from './PaperTagsEditor';
 import ReadingActivity from './ReadingActivity';
 import ConfirmDialog from './ConfirmDialog';
 import WorkspaceFrame from './WorkspaceFrame';
 import type {Account} from './AppShell';
 import type {PublicationInfo} from '@/lib/document';
 
-type Paper = {documentId: string; title: string; authors: string[]; pageCount: number; status: string; parseSource?: string; arxivId?: string; arxivVersion?: number; createdAt: number; lastOpenedAt?: number; annotationCount: number; progress: number; favorite: boolean; previewSrc?: string; publication?: PublicationInfo};
+type Paper = {documentId: string; title: string; authors: string[]; pageCount: number; status: string; parseSource?: string; arxivId?: string; arxivVersion?: number; createdAt: number; lastOpenedAt?: number; annotationCount: number; progress: number; favorite: boolean; previewSrc?: string; publication?: PublicationInfo; tags?: PaperTags};
 type Section = 'all' | 'recent' | 'favorites';
 type UploadState = {documentId: string; status: string; stage?: string; progress?: number; error?: string};
 const stages: Record<string, string> = {queued: '等待解析', loading_parser: '准备解析器', fetching_arxiv_html: '获取 arXiv 官方 HTML', fetching_arxiv_pdf: '获取固定版本 PDF', extracting_structure: '提取正文', recognizing_scanned_pages: '识别扫描页', linking_references: '整理参考文献', normalizing_document: '整理图表和公式'};
@@ -29,6 +30,7 @@ export default function LibraryShell({user, onLogout}: {user: Account; onLogout:
   const [sort, setSort] = useState('recent');
   const [view, setView] = useState<'list' | 'grid'>('list');
   const [deleteTarget, setDeleteTarget] = useState<Paper | null>(null);
+  const [tagTarget,setTagTarget] = useState<Paper | null>(null);
   const picker = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
@@ -80,6 +82,15 @@ export default function LibraryShell({user, onLogout}: {user: Account; onLogout:
     setPapers(current => current.filter(item => item.documentId !== paper.documentId));
   };
 
+  const saveTags = async (tags: PaperTags) => {
+    if (!tagTarget) return;
+    const response = await fetch(`/api/parser/api/documents/${tagTarget.documentId}/tags`, {method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(tags)});
+    if (!response.ok) throw new Error('标签保存失败，请检查输入后重试。');
+    const saved = await response.json() as PaperTags;
+    setPapers(current=>current.map(item=>item.documentId===tagTarget.documentId?{...item,tags:saved}:item));
+    setTagTarget(null);
+  };
+
   const recent = [...papers].filter(item => item.lastOpenedAt && item.status === 'ready').sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0));
   const source = section === 'favorites' ? papers.filter(item => item.favorite) : section === 'recent' ? recent : papers;
   const filtered = source.filter(item => `${item.title} ${item.authors.join(' ')}`.toLowerCase().includes(query.trim().toLowerCase())).sort((a, b) => sort === 'title' ? a.title.localeCompare(b.title) : sort === 'added' ? b.createdAt - a.createdAt : (b.lastOpenedAt || b.createdAt) - (a.lastOpenedAt || a.createdAt));
@@ -97,7 +108,7 @@ export default function LibraryShell({user, onLogout}: {user: Account; onLogout:
     {message && <div className="library-message" role="status">{message}<button onClick={() => setMessage('')} aria-label="关闭提示">×</button></div>}
     {section === 'all' && <section className="library-recent"><div className="library-section-heading"><h2>最近阅读</h2>{recent.length > 3 && <button onClick={() => setSection('recent')}>查看全部</button>}</div>{recent.length ? <div className="library-recent-grid">{recent.slice(0, 3).map(item => <button className="library-recent-card" key={item.documentId} onClick={() => open(item)}><span className="paper-cover">{item.previewSrc ? <img src={item.previewSrc?.startsWith('/api/documents/') ? `/api/parser${item.previewSrc}` : item.previewSrc} alt="" /> : <BookOpen size={30} />}</span><strong title={item.title}>{item.title}</strong><small>{item.authors.slice(0, 1).join('') || '作者待确认'}{item.authors.length > 1 ? ' et al.' : ''}</small><span className="paper-progress"><i style={{width: `${item.progress || 0}%`}} /></span><span className="recent-card-footer"><small>{Math.round(item.progress || 0)}% · {item.pageCount} 页<br />{dateLabel(item.lastOpenedAt)}</small><ChevronRight size={17} /></span></button>)}</div> : <p className="library-empty">打开论文后，最近阅读会显示在这里。</p>}</section>}
     <section className="library-papers"><div className="library-section-heading library-files-toolbar"><div><h2>{section === 'all' ? '我的论文' : section === 'recent' ? '最近阅读' : '收藏'}</h2><small>{filtered.length} 篇</small></div>{search}<div className="library-view-controls"><select aria-label="论文排序" value={sort} onChange={event => setSort(event.target.value)}><option value="recent">最近打开</option><option value="added">添加时间</option><option value="title">标题</option></select><button aria-label="列表视图" aria-pressed={view === 'list'} onClick={() => setView('list')}><List size={17} /></button><button aria-label="网格视图" aria-pressed={view === 'grid'} onClick={() => setView('grid')}><Grid2X2 size={17} /></button></div></div>
-      {loading ? <p className="library-empty">正在加载论文…</p> : filtered.length ? <div className={`paper-library ${view}`}><div className="paper-table-heading"><span>标题</span><span>作者</span><span>添加时间</span><span>进度</span><span /></div>{filtered.map(item => <div className="paper-library-row" key={item.documentId}><button className="paper-title-button" onClick={() => open(item)} title={item.title}><span className="paper-file-icon"><FileText size={19} /></span><span className="paper-title-copy"><strong>{item.title}</strong>{item.publication && <span className="library-publication-tags" title={[item.publication.venue_short, item.publication.publish_time, ...(item.publication.institutions || [])].filter(Boolean).join(" · ")}>{item.publication.venue_short && <span title={item.publication.venue || undefined}>{item.publication.venue_short}</span>}{item.publication.publish_time && <time>{String(item.publication.publish_time).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3')}</time>}{item.publication.institutions?.map(institution => <span key={institution} title={institution}>{institution}</span>)}{item.publication.publication_status === 'preprint' && <span>预印本</span>}</span>}</span></button><span className="paper-row-authors" title={item.authors.join(', ')}>{item.authors[0] || '待确认'}{item.authors.length > 1 ? ' et al.' : ''}</span><span className="paper-row-date">{dateLabel(item.createdAt)}</span><span className="paper-row-progress">{item.status === 'ready' ? `${Math.round(item.progress || 0)}%` : item.status === 'failed' ? '失败' : '解析中'}<small>{item.pageCount} 页 · {item.annotationCount} 条标注</small></span><div className="library-paper-actions"><button title={item.favorite ? '取消收藏' : '收藏'} aria-label={item.favorite ? `取消收藏 ${item.title}` : `收藏 ${item.title}`} onClick={() => void toggleFavorite(item)}><Star size={16} fill={item.favorite ? 'currentColor' : 'none'} /></button><button title="删除论文" aria-label={`删除 ${item.title}`} onClick={() => setDeleteTarget(item)}><Trash2 size={16} /></button></div></div>)}</div> : <p className="library-empty">{query ? '没有找到匹配的论文。' : '这里还没有论文，导入 PDF 开始阅读。'}</p>}
-    </section>{deleteTarget && <ConfirmDialog title="删除论文？" message={`《${deleteTarget.title}》及其笔记将被删除，此操作无法撤销。`} onCancel={() => setDeleteTarget(null)} onConfirm={() => deletePaper(deleteTarget)} />}<input ref={picker} hidden type="file" accept="application/pdf,.pdf" onChange={event => void importPdf(event.target.files?.[0])} />
+      {loading ? <p className="library-empty">正在加载论文…</p> : filtered.length ? <div className={`paper-library ${view}`}><div className="paper-table-heading"><span>标题</span><span>作者</span><span>添加时间</span><span>进度</span><span /></div>{filtered.map(item => <div className="paper-library-row" key={item.documentId}><button className="paper-title-button" onClick={() => open(item)} title={item.title}><span className="paper-file-icon"><FileText size={19} /></span><span className="paper-title-copy"><strong>{item.title}</strong><PaperLabels tags={item.tags || publicationTags(item.publication)} /></span></button><span className="paper-row-authors" title={item.authors.join(', ')}>{item.authors[0] || '待确认'}{item.authors.length > 1 ? ' et al.' : ''}</span><span className="paper-row-date">{dateLabel(item.createdAt)}</span><span className="paper-row-progress">{item.status === 'ready' ? `${Math.round(item.progress || 0)}%` : item.status === 'failed' ? '失败' : '解析中'}<small>{item.pageCount} 页 · {item.annotationCount} 条标注</small></span><div className="library-paper-actions"><button title="编辑标签" aria-label={`编辑标签 ${item.title}`} onClick={() => setTagTarget(item)}><MoreHorizontal size={17}/></button><button title={item.favorite ? '取消收藏' : '收藏'} aria-label={item.favorite ? `取消收藏 ${item.title}` : `收藏 ${item.title}`} onClick={() => void toggleFavorite(item)}><Star size={16} fill={item.favorite ? 'currentColor' : 'none'} /></button><button title="删除论文" aria-label={`删除 ${item.title}`} onClick={() => setDeleteTarget(item)}><Trash2 size={16} /></button></div></div>)}</div> : <p className="library-empty">{query ? '没有找到匹配的论文。' : '这里还没有论文，导入 PDF 开始阅读。'}</p>}
+    </section>{tagTarget && <PaperTagsEditor title={tagTarget.title} tags={tagTarget.tags || publicationTags(tagTarget.publication)} publication={tagTarget.publication} onCancel={()=>setTagTarget(null)} onSave={saveTags}/ >}{deleteTarget && <ConfirmDialog title="删除论文？" message={`《${deleteTarget.title}》及其笔记将被删除，此操作无法撤销。`} onCancel={() => setDeleteTarget(null)} onConfirm={() => deletePaper(deleteTarget)} />}<input ref={picker} hidden type="file" accept="application/pdf,.pdf" onChange={event => void importPdf(event.target.files?.[0])} />
   </WorkspaceFrame>;
 }

@@ -50,6 +50,21 @@ class AccountApiTests(unittest.TestCase):
         main.jobs.clear()
         self.temp.cleanup()
 
+    def test_library_tags_are_private_validated_and_independent_of_publication(self) -> None:
+        endpoint = f"/api/documents/{self.document_id}/tags"
+        tags = {"venue": "TVCG2026", "publishDate": "2026-08-25", "institutions": ["浙江大学", "浙江大学"], "other": [" 待精读 "]}
+        self.assertEqual(self.bob_client.patch(endpoint, json=tags).status_code, 404)
+        response = self.alice_client.patch(endpoint, json=tags)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["institutions"], ["浙江大学"])
+        self.assertEqual(response.json()["other"], ["待精读"])
+        self.assertEqual(self.alice_client.get("/api/documents").json()[0]["tags"]["venue"], "TVCG2026")
+        self.assertEqual(self.bob_client.get("/api/documents").json(), [])
+        self.assertEqual(self.alice_client.patch(endpoint, json={**tags, "publishDate": "2026-02-30"}).status_code, 422)
+        folder = self.root / "users" / self.alice["id"] / "documents" / self.document_id
+        (folder / "publication.json").write_text(json.dumps({"status": "ready", "information": {"venue_short": "NEW2027"}}), encoding="utf-8")
+        self.assertEqual(self.alice_client.get("/api/documents").json()[0]["tags"]["venue"], "TVCG2026")
+
     def test_reading_activity_is_private_idempotent_and_survives_paper_deletion(self) -> None:
         from datetime import date
         today = date.today().isoformat()

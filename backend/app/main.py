@@ -22,6 +22,7 @@ from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Resp
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
+from .paper_tags import PaperTags, read_tags
 from .accounts import AccountStore
 from .reading_activity import ReadingTick, record_tick, summary as reading_summary
 from datetime import date
@@ -489,7 +490,7 @@ def list_documents(request: Request) -> list[dict[str, Any]]:
             publication_path = folder / "publication.json"
             publication_state = json.loads(publication_path.read_text(encoding="utf-8")) if publication_path.is_file() else {}
             publication = publication_state.get("information") if publication_state.get("status") == "ready" else None
-            records.append({"publication": publication, "previewSrc": preview_src, "documentId": item["id"], "fingerprint": item["fingerprint"],
+            records.append({"tags": read_tags(folder), "publication": publication, "previewSrc": preview_src, "documentId": item["id"], "fingerprint": item["fingerprint"],
                             "title": item["title"], "status": status.get("status", item["parse_status"]),
                             "parseSource": status.get("parseSource", ""), "arxivId": status.get("arxivId", ""),
                             "arxivVersion": status.get("arxivVersion"),
@@ -500,6 +501,14 @@ def list_documents(request: Request) -> list[dict[str, Any]]:
         except (OSError, ValueError, TypeError):
             continue
     return sorted(records, key=lambda item: item["createdAt"], reverse=True)
+
+
+@app.patch("/api/documents/{document_id}/tags")
+def set_document_tags(document_id: str, tags: PaperTags) -> dict[str, Any]:
+    _document_record(document_id)
+    value = tags.model_dump()
+    _atomic_json(_document_folder(document_id) / "paper-tags.json", value)
+    return value
 
 
 @app.patch("/api/documents/{document_id}/favorite")
