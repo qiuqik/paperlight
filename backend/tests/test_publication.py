@@ -22,3 +22,10 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaises(ValueError): parse_lookup({'content':[]},self.title)
     def test_invalid_date_rejected(self):
         with self.assertRaises(ValueError): PublicationInfo(publish_time=20260230)
+
+    def test_short_label_and_institutions(self):
+        info,_ = parse_lookup(self.response(venue_short='VIS2026', institutions=['浙江大学']),self.title)
+        self.assertEqual(info.venue_short, 'VIS2026')
+        self.assertEqual(info.institutions, ['浙江大学'])
+        info,_ = parse_lookup(self.response(venue_short='VIS2026', publication_source_url='https://invented.example'),self.title)
+        self.assertIsNone(info.venue_short)

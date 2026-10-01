@@ -3,6 +3,7 @@
 import {useCallback, useEffect, useState} from 'react';
 import type {Account} from './AppShell';
 import {Plus, Search, X} from 'lucide-react';
+import ConfirmDialog from './ConfirmDialog';
 import WorkspaceFrame, {AdminNavigation} from './WorkspaceFrame';
 
 type UserRow = Account & {disabled: number; document_count: number; last_login_at: number | null};
@@ -21,6 +22,7 @@ export default function Administration({user, onLogout}: {user: Account; onLogou
   const [message, setMessage] = useState('');
   const [query, setQuery] = useState('');
   const [creating, setCreating] = useState(false);
+  const [confirmation, setConfirmation] = useState<{message: string; action: () => Promise<void>} | null>(null);
 
   const loadUsers = useCallback(async () => {
     const response = await fetch('/api/parser/api/admin/users', {cache: 'no-store'});
@@ -65,16 +67,16 @@ export default function Administration({user, onLogout}: {user: Account; onLogou
   };
 
   const deleteUser = async () => {
-    if (!selected || selected.id === user.id || !window.confirm(`彻底删除 ${selected.username} 及其所有论文和笔记？此操作无法撤销。`)) return;
+    if (!selected || selected.id === user.id) return;
     const response = await fetch(`/api/parser/api/admin/users/${selected.id}`, {method: 'DELETE'});
-    if (!response.ok) {setMessage('删除用户失败，请检查是否有论文仍在解析'); return;}
+    if (!response.ok) throw new Error('删除用户失败');
     setSelected(null); setDocuments([]); await loadUsers(); setMessage('账户及数据已删除');
   };
 
   const deleteDocument = async (item: Paper) => {
-    if (!selected || !window.confirm(`删除 ${selected.username} 的论文「${item.title}」及其笔记？`)) return;
+    if (!selected) return;
     const response = await fetch(`/api/parser/api/documents/${item.documentId}`, {method: 'DELETE'});
-    if (!response.ok) {setMessage('删除论文失败，可能仍在解析'); return;}
+    if (!response.ok) throw new Error('删除论文失败');
     setDocuments(current => current.filter(record => record.documentId !== item.documentId));
     await loadUsers(); setMessage('论文已删除');
   };
@@ -88,8 +90,9 @@ export default function Administration({user, onLogout}: {user: Account; onLogou
     {selected && <div className="dialog-backdrop" onClick={() => setSelected(null)}><section className="admin-dialog" role="dialog" aria-modal="true" aria-label={`管理 ${selected.username}`} onClick={event => event.stopPropagation()}><div className="drawer-title"><h2>{selected.username}</h2><button aria-label="关闭" onClick={() => setSelected(null)}><X size={20} /></button></div><div className="admin-edit"><label>用户名<input value={username} onChange={event => setUsername(event.target.value)} /></label>
       <label>显示名称<input value={displayName} onChange={event => setDisplayName(event.target.value)} /></label>
       <label>重置密码<input type="password" value={password} minLength={4} onChange={event => setPassword(event.target.value)} placeholder="留空则不修改；至少 4 位" /></label>
-      <button onClick={() => void saveUser()}>保存修改</button>{selected.id !== user.id && <><button onClick={() => void setDisabled(!selected.disabled)}>{selected.disabled ? '启用账户' : '停用账户'}</button><button className="danger" onClick={() => void deleteUser()}>删除账户及数据</button></>}</div>
-      <h3>论文</h3><div className="admin-documents">{documents.length ? documents.map(item => <div className="admin-document-row" key={item.documentId}><a href={`/reader/${item.documentId}`}>{item.title}<small>{item.pageCount} 页 · {item.status}</small></a><button aria-label={`删除 ${item.title}`} onClick={() => void deleteDocument(item)}>删除</button></div>) : <p>暂无论文</p>}</div></section></div>}
+      <button onClick={() => void saveUser()}>保存修改</button>{selected.id !== user.id && <><button onClick={() => void setDisabled(!selected.disabled)}>{selected.disabled ? '启用账户' : '停用账户'}</button><button className="danger" onClick={() => setConfirmation({message: `彻底删除 ${selected.username} 及其所有论文和笔记？此操作无法撤销。`, action: deleteUser})}>删除账户及数据</button></>}</div>
+      <h3>论文</h3><div className="admin-documents">{documents.length ? documents.map(item => <div className="admin-document-row" key={item.documentId}><a href={`/reader/${item.documentId}`}>{item.title}<small>{item.pageCount} 页 · {item.status}</small></a><button aria-label={`删除 ${item.title}`} onClick={() => setConfirmation({message: `删除《${item.title}》及其笔记？此操作无法撤销。`, action: () => deleteDocument(item)})}>删除</button></div>) : <p>暂无论文</p>}</div></section></div>}
+    {confirmation && <ConfirmDialog title="确认删除？" message={confirmation.message} onCancel={() => setConfirmation(null)} onConfirm={async () => {await confirmation.action(); setConfirmation(null);}} />}
     {message && <p className="admin-message" role="status">{message}</p>}
   </div></WorkspaceFrame>;
 }

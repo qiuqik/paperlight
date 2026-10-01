@@ -29,6 +29,8 @@ async function proxy(request: NextRequest, {params}: Context) {
     if (contentType) headers.set('content-type', contentType);
     const cookie = request.headers.get('cookie');
     if (cookie) headers.set('cookie', cookie);
+    const isPdf = path.at(-1) === 'original.pdf';
+    if (isPdf) for (const name of ['range', 'if-range', 'if-none-match', 'if-modified-since']) {const value = request.headers.get(name); if (value) headers.set(name, value);}
     headers.set('x-forwarded-proto', origin?.startsWith('https://') ? 'https' : request.headers.get('x-forwarded-proto') ?? request.nextUrl.protocol.replace(':', ''));
     const upstream = await fetch(target, {
       method: request.method,
@@ -42,6 +44,10 @@ async function proxy(request: NextRequest, {params}: Context) {
     const setCookie = upstream.headers.get('set-cookie');
     if (setCookie) resultHeaders.set('set-cookie', setCookie);
     resultHeaders.set('cache-control', 'no-store');
+    if (isPdf && [200, 206, 304].includes(upstream.status)) {
+      for (const name of ['content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified', 'cache-control']) {const value = upstream.headers.get(name); if (value) resultHeaders.set(name, value);}
+      resultHeaders.set('vary', 'Cookie');
+    }
     return new Response(upstream.body, {status: upstream.status, headers: resultHeaders});
   } catch {
     return Response.json({detail: 'Parser service unavailable'}, {status: 503});
@@ -49,6 +55,7 @@ async function proxy(request: NextRequest, {params}: Context) {
 }
 
 export const GET = proxy;
+export const HEAD = proxy;
 export const POST = proxy;
 export const PATCH = proxy;
 export const DELETE = proxy;

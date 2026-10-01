@@ -12,7 +12,7 @@ export type Block = {
 export type Section = {id: string; title: string; level: number; type?: string; presentation?: 'article' | 'prompt'; blocks: Block[]};
 export type Reference = {id: string; number: number; authors: string; title: string; venue?: string; year?: number; doi?: string; preview?: string};
 export type PageGeometry = {number: number; width: number; height: number};
-export type PublicationInfo = {publication_status: 'published' | 'accepted' | 'preprint' | 'unknown'; venue: string | null; publish_time: number | null; authors: string[]; institutions: string[]; keywords: string[]; publication_source_url: string | null; source_urls: string[]; checked_at: string};
+export type PublicationInfo = {publication_status: 'published' | 'accepted' | 'preprint' | 'unknown'; venue: string | null; venue_short?: string | null; publish_time: number | null; authors: string[]; institutions: string[]; keywords: string[]; publication_source_url: string | null; source_urls: string[]; checked_at: string};
 export type DocumentModel = {
   id: string; modelVersion?: number; fingerprint?: string; metadata: {title: string; authors: string[]; affiliations?: string[]; authorNotes?: string[]; pageCount: number; readMinutes?: number; venue?: string; year?: number; publication?: PublicationInfo};
   sections: Section[]; references: Reference[]; figures: Block[]; tables: Block[]; pages?: PageGeometry[];

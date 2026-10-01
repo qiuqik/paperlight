@@ -50,6 +50,21 @@ class AccountApiTests(unittest.TestCase):
         main.jobs.clear()
         self.temp.cleanup()
 
+    def test_pdf_ranges_and_cache_revalidation_still_require_ownership(self) -> None:
+        folder = main._document_folder(self.document_id)
+        (folder / 'original.pdf').write_bytes(b'%PDF-private-document')
+        url = f'/api/documents/{self.document_id}/original.pdf'
+        response = self.alice_client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('private', response.headers['cache-control'])
+        partial = self.alice_client.get(url, headers={'range': 'bytes=0-3'})
+        self.assertEqual(partial.status_code, 206)
+        self.assertEqual(partial.content, b'%PDF')
+        headers = {'if-none-match': response.headers['etag']}
+        self.assertEqual(self.alice_client.get(url, headers=headers).status_code, 304)
+        self.assertEqual(self.bob_client.get(url, headers=headers).status_code, 404)
+        self.assertEqual(TestClient(main.app).get(url, headers=headers).status_code, 401)
+
     def test_documents_annotations_and_assets_are_user_scoped(self) -> None:
         doc = self.document_id
         self.assertEqual(TestClient(main.app).get("/api/documents").status_code, 401)
@@ -94,6 +109,13 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(record["title"], "Private")
         self.assertEqual(record["parse_status"], "ready")
         self.assertEqual(json.loads(record["authors"]), ["Verified Author"])
+        with patch.object(main, 'lookup_publication', side_effect=ValueError('Unavailable')):
+            with self.assertLogs(main.logger, level='ERROR'):
+                main._enrich_publication(self.document_id)
+        retained = self.alice_client.get(f"/api/documents/{self.document_id}/publication").json()
+        self.assertEqual(retained['status'], 'ready')
+        self.assertEqual(retained['information']['authors'], ['Verified Author'])
+        self.assertIn('refreshError', retained)
         self.assertEqual(self.bob_client.get(f"/api/documents/{self.document_id}/publication").status_code, 404)
 
     def test_pdf_annotation_rectangles_are_saved_and_validated(self) -> None:

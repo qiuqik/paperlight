@@ -767,19 +767,24 @@ def _ensure_publication_job(document_id: str) -> None:
         if document_id in publication_active:
             return
         path = _document_folder(document_id) / 'publication.json'
+        current = {}
         if path.is_file():
             current = json.loads(path.read_text(encoding='utf-8'))
-            if current.get('status') == 'ready':
+            if current.get('status') == 'ready' and 'venue_short' in current.get('information', {}):
                 return
         publication_active.add(document_id)
-        _atomic_json(path, {'status': 'processing', 'startedAt': time.time()})
+        _atomic_json(path, {**current, 'status': 'processing', 'startedAt': time.time()})
     publication_executor.submit(_enrich_publication, document_id)
 
 
 def _enrich_publication(document_id: str) -> None:
+    previous = {}
     try:
         record = ACCOUNTS.document(document_id)
         folder = _document_folder(document_id)
+        sidecar = folder / 'publication.json'
+        if sidecar.is_file():
+            previous = json.loads(sidecar.read_text(encoding='utf-8'))
         model = DocumentModel(**json.loads((folder / 'document.json').read_text(encoding='utf-8')))
         information, evidence = lookup_publication(model.metadata.title, model.metadata.doi, model.arxivId)
         current = ACCOUNTS.document(document_id)
@@ -793,7 +798,8 @@ def _enrich_publication(document_id: str) -> None:
     except Exception:
         logger.exception('Publication lookup failed for %s', document_id)
         if ACCOUNTS.document(document_id):
-            _atomic_json(_document_folder(document_id) / 'publication.json', {'status': 'failed', 'error': '论文信息查询未完成，请稍后重试。'})
+            fallback = {**previous, 'status': 'ready', 'refreshError': '论文信息更新未完成，保留上次查询结果。'} if previous.get('information') else {'status': 'failed', 'error': '论文信息查询未完成，请稍后重试。'}
+            _atomic_json(_document_folder(document_id) / 'publication.json', fallback)
     finally:
         with publication_lock:
             publication_active.discard(document_id)
@@ -850,12 +856,18 @@ def get_asset(document_id: str, asset_name: str) -> FileResponse:
 
 
 @app.get("/api/documents/{document_id}/original.pdf")
-def get_original_pdf(document_id: str) -> FileResponse:
+@app.head("/api/documents/{document_id}/original.pdf")
+def get_original_pdf(document_id: str, request: Request) -> Response:
     _document_record(document_id)
     path = _document_folder(document_id) / "original.pdf"
     if not path.is_file():
         raise HTTPException(status_code=404, detail="This document has no PDF original.")
-    return FileResponse(path, media_type="application/pdf", content_disposition_type="inline")
+    result = FileResponse(path, stat_result=path.stat(), media_type="application/pdf", content_disposition_type="inline",
+                          headers={"Cache-Control": "private, max-age=0, must-revalidate", "Vary": "Cookie"})
+    # Authorization runs above even for cache revalidation.
+    if request.headers.get('if-none-match') == result.headers.get('etag'):
+        return Response(status_code=304, headers={key: result.headers[key] for key in ('etag', 'cache-control', 'vary')})
+    return result
 
 
 @app.patch("/api/documents/{document_id}/formulas/{block_id}")

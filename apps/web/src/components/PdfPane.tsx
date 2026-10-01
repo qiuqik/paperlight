@@ -75,7 +75,7 @@ export default function PdfPane(props: Props) {
   const area = useRef<{x:number;y:number;page:HTMLElement} | null>(null);
   useEffect(()=>{let active=true;let destroy:(()=>void)|undefined;
     setPdf(null);setError('');
-    void import('pdfjs-dist').then(library=>{library.GlobalWorkerOptions.workerSrc='/pdf.worker.min.mjs';const task=library.getDocument({url:`/api/parser/api/documents/${serverId}/original.pdf`,cMapUrl:'/pdf-cmaps/',cMapPacked:true,standardFontDataUrl:'/pdf-fonts/'});destroy=()=>void task.destroy();return task.promise;}).then(document=>{if(active)setPdf(document);}).catch(()=>{if(active)setError('原 PDF 暂时无法加载，网页仍可阅读。');});
+    void import('pdfjs-dist').then(library=>{library.GlobalWorkerOptions.workerSrc='/pdf.worker.min.mjs';const task=library.getDocument({url:`/api/parser/api/documents/${serverId}/original.pdf`,disableAutoFetch:true,disableStream:true,rangeChunkSize:131072,cMapUrl:'/pdf-cmaps/',cMapPacked:true,standardFontDataUrl:'/pdf-fonts/'});destroy=()=>void task.destroy();return task.promise;}).then(document=>{if(active)setPdf(document);}).catch(()=>{if(active)setError('原 PDF 暂时无法加载，网页仍可阅读。');});
     return ()=>{active=false;destroy?.();};
   },[serverId]);
   useEffect(()=>{const element=scrollRef.current;if(!element)return;const observer=new ResizeObserver(()=>setFit(Math.max(240,element.clientWidth-32)));observer.observe(element);return ()=>observer.disconnect();},[scrollRef]);

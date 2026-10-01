@@ -43,3 +43,5 @@ Windows 主机必须保持开机且已登录，Docker Desktop 与 Tailscale 需�
 | `scripts/` | Windows 登录启动与停止脚本 |
 
 本机开发时先停止根目录 Compose，再用 `backend/docker-compose.yml` 临时提供 `127.0.0.1:8000` 的 parser API，随后运行 `npm run dev`。完成后停止临时后端，再运行根目录的 `docker compose up -d --no-build` 恢复远程服务。更多 API 路由与解析参数见 [backend/README.md](backend/README.md)。
+
+阅读器默认仅显示网页正文。点击 PDF 图标才加载左侧原文，交界处可拖拽分配宽度，两栏独立滚动；目录和图表点击定位与共享标注保留。PDF 代理转发 Range 和 ETag，使用按账户权限校验的私有缓存，PDF.js 按需读取页面。首页发表标签优先使用 DeepSeek 返回的 `venue_short`（例如 `TVCG2026`），具体日期显示为 `YYYY-MM-DD`，机构直接展示查询值，未确认的信息留空。
