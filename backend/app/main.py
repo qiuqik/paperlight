@@ -466,7 +466,10 @@ def list_documents(request: Request) -> list[dict[str, Any]]:
             if model_path.is_file():
                 model_data = json.loads(model_path.read_text(encoding="utf-8"))
                 preview_src = next((figure.get("src") for figure in model_data.get("figures", []) if figure.get("src")), None)
-            records.append({"previewSrc": preview_src, "documentId": item["id"], "fingerprint": item["fingerprint"],
+            publication_path = folder / "publication.json"
+            publication_state = json.loads(publication_path.read_text(encoding="utf-8")) if publication_path.is_file() else {}
+            publication = publication_state.get("information") if publication_state.get("status") == "ready" else None
+            records.append({"publication": publication, "previewSrc": preview_src, "documentId": item["id"], "fingerprint": item["fingerprint"],
                             "title": item["title"], "status": status.get("status", item["parse_status"]),
                             "parseSource": status.get("parseSource", ""), "arxivId": status.get("arxivId", ""),
                             "arxivVersion": status.get("arxivVersion"),
@@ -586,9 +589,10 @@ def _create_v2_annotation(folder: Path, document_id: str, annotation: dict[str, 
         block_id = anchor.get("blockId")
         box = anchor.get("bbox")
         page = anchor.get("page")
-        if block_id not in blocks or not isinstance(box, dict) or not isinstance(page, int) or page < 1:
+        pdf_page_anchor = anchor.get("pdfOnly") is True and anchor.get("space") == "page" and block_id == f"pdf-page-{page}" and isinstance(page, int) and 1 <= page <= document.get("metadata", {}).get("pageCount", 0) and (folder / "original.pdf").is_file()
+        if (block_id not in blocks and not pdf_page_anchor) or not isinstance(box, dict) or not isinstance(page, int) or isinstance(page, bool) or page < 1:
             raise HTTPException(status_code=422, detail="Invalid area anchor.")
-        if blocks[block_id].get("page") is not None and blocks[block_id]["page"] != page:
+        if block_id in blocks and blocks[block_id].get("page") is not None and blocks[block_id]["page"] != page:
             raise HTTPException(status_code=422, detail="Area anchor page does not match its block.")
         if anchor.get("space", "block") not in {"block", "page"} or anchor.get("surface") not in {None, "image"}:
             raise HTTPException(status_code=422, detail="Invalid area coordinate space.")
@@ -610,6 +614,20 @@ def _create_v2_annotation(folder: Path, document_id: str, annotation: dict[str, 
         quote = anchor.get("quote")
         if not isinstance(quote, str) or not quote.strip() or len(quote) > 10000:
             raise HTTPException(status_code=422, detail="Invalid text quote.")
+    if "pdfRects" in anchor:
+        rectangles = anchor["pdfRects"]
+        if not isinstance(rectangles, list) or not 1 <= len(rectangles) <= 200:
+            raise HTTPException(status_code=422, detail="Invalid PDF highlight rectangles.")
+        for rectangle in rectangles:
+            try:
+                page = rectangle["page"]
+                x, y, width, height = (float(rectangle["bbox"][name]) for name in ("x", "y", "width", "height"))
+                page_count = document.get("metadata", {}).get("pageCount", 0)
+                valid = isinstance(page, int) and not isinstance(page, bool) and 1 <= page <= page_count and 0 <= x <= 1 and 0 <= y <= 1 and 0 < width <= 1 - x + 1e-8 and 0 < height <= 1 - y + 1e-8
+            except (KeyError, TypeError, ValueError):
+                valid = False
+            if not valid:
+                raise HTTPException(status_code=422, detail="PDF highlight is outside its page.")
     record_id = str(annotation.get("id", ""))
     if not re.fullmatch(r"[a-f0-9-]{32,36}", record_id):
         record_id = uuid.uuid4().hex

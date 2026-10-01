@@ -96,6 +96,36 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(json.loads(record["authors"]), ["Verified Author"])
         self.assertEqual(self.bob_client.get(f"/api/documents/{self.document_id}/publication").status_code, 404)
 
+    def test_pdf_annotation_rectangles_are_saved_and_validated(self) -> None:
+        path = main._document_folder(self.document_id) / "document.json"
+        model = json.loads(path.read_text())
+        model["metadata"]["pageCount"] = 2
+        path.write_text(json.dumps(model))
+        note = {"id": "a" * 32, "type": "highlight", "color": "#f8d86a", "anchor": {"start": {"blockId": "p1", "offset": 0}, "end": {"blockId": "p1", "offset": 6}, "quote": "secret", "pdfRects": [{"page": 1, "bbox": {"x": .1, "y": .1, "width": .2, "height": .03}}]}}
+        endpoint = f"/api/documents/{self.document_id}/annotations"
+        self.assertEqual(self.alice_client.post(endpoint, json=note).status_code, 201)
+        self.assertEqual(self.alice_client.get(endpoint).json()[0]["anchor"]["pdfRects"][0]["page"], 1)
+        note["anchor"]["pdfRects"][0]["page"] = 3
+        self.assertEqual(self.alice_client.post(endpoint, json=note).status_code, 422)
+        note["anchor"]["pdfRects"][0]["page"] = 1
+        note["anchor"]["pdfRects"][0]["bbox"]["width"] = 1
+        self.assertEqual(self.alice_client.post(endpoint, json=note).status_code, 422)
+
+    def test_pdf_only_regions_require_an_owned_original_and_valid_page(self) -> None:
+        folder = main._document_folder(self.document_id)
+        path = folder / "document.json"
+        model = json.loads(path.read_text())
+        model["metadata"]["pageCount"] = 2
+        path.write_text(json.dumps(model))
+        value = {"id": "b" * 32, "type": "area", "color": "#f8d86a", "anchor": {"blockId": "pdf-page-2", "page": 2, "space": "page", "pdfOnly": True, "bbox": {"x": .1, "y": .1, "width": .2, "height": .03}}}
+        endpoint = f"/api/documents/{self.document_id}/annotations"
+        self.assertEqual(self.alice_client.post(endpoint, json=value).status_code, 422)
+        (folder / "original.pdf").write_bytes(b"%PDF-test")
+        self.assertEqual(self.alice_client.post(endpoint, json=value).status_code, 201)
+        self.assertEqual(self.bob_client.post(endpoint, json=value).status_code, 404)
+        value["anchor"].update(blockId="pdf-page-3", page=3)
+        self.assertEqual(self.alice_client.post(endpoint, json=value).status_code, 422)
+
     def test_arxiv_import_route_is_retired(self) -> None:
         response = self.alice_client.post("/api/documents/arxiv", json={"url": "https://arxiv.org/abs/2603.17965v1"})
         self.assertEqual(response.status_code, 405)

@@ -66,7 +66,7 @@ function PlainText({text, onReference}: {text: string; onReference: (id: string)
 function AreaMarks({block, annotations, pages, surface = 'block'}: {block: Block; annotations: Annotation[]; pages: PageGeometry[]; surface?: 'block' | 'image'}) {
   return <>{annotations.filter(annotation => annotation.type === 'area' && !isTextAnchor(annotation.anchor) && annotation.anchor.blockId === block.id && (annotation.anchor.surface === 'image') === (surface === 'image')).map(annotation => {
     const anchor = annotation.anchor;
-    if (isTextAnchor(anchor)) return null;
+    if (isTextAnchor(anchor) || anchor.pdfOnly) return null;
     let {bbox} = anchor;
     const page = pages.find(item => item.number === anchor.page);
     if (anchor.space === 'page' && page && block.bbox) bbox = {

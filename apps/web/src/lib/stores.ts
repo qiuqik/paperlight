@@ -23,7 +23,7 @@ export const usePreferences = create<Preferences>(set => ({
 
 type Layout = {focus: boolean; leftOpen: boolean; rightOpen: boolean; rightPanel: RightPanel; settingsOpen: boolean; historyOpen: boolean; set: (values: Partial<Omit<Layout, 'set'>>) => void};
 export const useLayout = create<Layout>(set => ({
-  focus: false, leftOpen: true, rightOpen: true, rightPanel: 'references', settingsOpen: false, historyOpen: false,
+  focus: false, leftOpen: false, rightOpen: false, rightPanel: 'references', settingsOpen: false, historyOpen: false,
   set: values => set(values),
 }));
 type AnnotationUI = {markStyle: MarkStyle | null; noteEnabled: boolean; setStyle: (style: MarkStyle) => void; setNoteEnabled: (enabled: boolean) => void};

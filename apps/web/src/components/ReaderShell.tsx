@@ -2,6 +2,8 @@
 import {useCallback, useEffect, useLayoutEffect, useRef, useState} from 'react';
 import {BookOpen, ChevronLeft, ChevronRight, Clock3, Highlighter, Image, List, Maximize2, Minus, Plus, Scan, Settings2, StickyNote, Table2, Underline, X} from 'lucide-react';
 import DocumentRenderer from './DocumentRenderer';
+import PdfPane from './PdfPane';
+import {useReaderSync} from '@/lib/useReaderSync';
 import AccountMenu from './AccountMenu';
 import type {Account} from './AppShell';
 import demo from '@/data/demo.json';
@@ -58,6 +60,10 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
   const [colorOpen, setColorOpen] = useState(false);
   const colorControlRef = useRef<HTMLDivElement>(null);
   const articleRef = useRef<HTMLElement>(null);
+  const pdfRef = useRef<HTMLDivElement>(null);
+  const [splitView, setSplitView] = useState(true);
+  const [syncEnabled, setSyncEnabled] = useState(true);
+  useReaderSync(articleRef, pdfRef, paper, splitView && syncEnabled && !!serverId);
   const readingAnchorRef = useRef<{blockId: string; blockOffset: number} | null>(null);
   const areaStart = useRef<{block: HTMLElement; surface: HTMLElement; x: number; y: number} | null>(null);
   const noteSyncTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
@@ -73,6 +79,7 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
   useEffect(() => {
     let active = true;
     usePreferences.getState().reset();
+    useLayout.getState().set({leftOpen: false, rightOpen: false, focus: false});
     void fetch('/api/parser/api/settings', {cache: 'no-store'}).then(async response => {
       if (response.ok && active) prefs.set(await response.json());
     }).catch(() => {if (active) setImportStatus('阅读设置暂时无法同步');})
@@ -396,6 +403,12 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
   const jumpToAnnotation = (record: Annotation) => {
     const root = articleRef.current;
     if (!root) return;
+    if (!isTextAnchor(record.anchor) && record.anchor.pdfOnly) {
+      setSplitView(true);
+      const anchor = record.anchor;
+      requestAnimationFrame(() => pdfRef.current?.querySelector(`[data-pdf-page="${anchor.page}"]`)?.scrollIntoView({block: 'start'}));
+      return;
+    }
     if (isTextAnchor(record.anchor)) {
       const range = resolveAnchor(root, record.anchor);
       range?.startContainer.parentElement?.scrollIntoView({behavior: 'smooth', block: 'center'});
@@ -416,11 +429,11 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
   </div>;
 
   return <div className={`reader-app theme-${prefs.theme} dock-${prefs.toolbarDock} ${layout.focus ? 'focus-mode' : ''} ${annotationUI.markStyle === 'area' ? 'area-mode' : ''}`} style={{'--reader-font': prefs.fontFamily, '--reader-size': `${prefs.fontSize}px`, '--reader-leading': prefs.lineHeight, '--reader-width': `${prefs.contentWidth}px`, '--custom-app': prefs.customApp, '--custom-paper': prefs.customPaper, '--custom-text': prefs.customText, '--custom-accent': prefs.customAccent} as React.CSSProperties}>
-    <header className="reader-topbar"><a className="brand reader-brand" href="/"><BookOpen size={20} /><strong>Paperlight</strong></a><a className="library-link" href="/">我的论文</a>{viewingOwner && <span className="owner-context">正在查看 {viewingOwner} 的论文</span>}<span className="top-title" title={paper.metadata.title}>{paper.metadata.title}</span>{prefs.toolbarDock === 'top' && toolbar}<div className="top-actions"><span className="read-time"><Clock3 size={15} /> {paper.metadata.readMinutes || '—'} min</span><button title="减小字号" aria-label="减小字号" onClick={() => prefs.set({fontSize: Math.max(14, prefs.fontSize - 1)})}><Minus size={16} /></button><button title="增大字号" aria-label="增大字号" onClick={() => prefs.set({fontSize: Math.min(26, prefs.fontSize + 1)})}><Plus size={16} /></button><button title="阅读设置" aria-label="阅读设置" onClick={() => layout.set({settingsOpen: true})}><Settings2 size={17} /></button><button title="专注模式" aria-label="专注模式" aria-pressed={layout.focus} onClick={() => layout.set({focus: !layout.focus, leftOpen: layout.focus, rightOpen: layout.focus})}><Maximize2 size={18} /></button><AccountMenu user={user} onLogout={onLogout} /></div></header>
+    <header className="reader-topbar"><a className="brand reader-brand" href="/"><BookOpen size={20} /><strong>Paperlight</strong></a><a className="library-link" href="/">我的论文</a>{viewingOwner && <span className="owner-context">正在查看 {viewingOwner} 的论文</span>}<span className="top-title" title={paper.metadata.title}>{paper.metadata.title}</span>{prefs.toolbarDock === 'top' && toolbar}<div className="top-actions"><span className="read-time"><Clock3 size={15} /> {paper.metadata.readMinutes || '—'} min</span><button title="PDF / 网页双栏" aria-label="PDF / 网页双栏" aria-pressed={splitView} onClick={() => setSplitView(value => !value)}>双栏</button><button title="同步滚动" aria-label="同步滚动" aria-pressed={syncEnabled} onClick={() => setSyncEnabled(value => !value)}>同步</button><button title="减小字号" aria-label="减小字号" onClick={() => prefs.set({fontSize: Math.max(14, prefs.fontSize - 1)})}><Minus size={16} /></button><button title="增大字号" aria-label="增大字号" onClick={() => prefs.set({fontSize: Math.min(26, prefs.fontSize + 1)})}><Plus size={16} /></button><button title="阅读设置" aria-label="阅读设置" onClick={() => layout.set({settingsOpen: true})}><Settings2 size={17} /></button><button title="专注模式" aria-label="专注模式" aria-pressed={layout.focus} onClick={() => layout.set({focus: !layout.focus, leftOpen: layout.focus, rightOpen: layout.focus})}><Maximize2 size={18} /></button><AccountMenu user={user} onLogout={onLogout} /></div></header>
     {importStatus && <div className="status-banner" role="status">{importStatus}<button aria-label="关闭提示" onClick={() => setImportStatus('')}><X size={14} /></button></div>}
     <div className="reader-grid"><aside className={`left-panel ${layout.leftOpen ? 'open' : ''}`}><div className="panel-heading"><span>目录</span><button title="收起目录" onClick={() => layout.set({leftOpen: false})}><ChevronLeft size={16} /></button></div><nav>{paper.sections.map(section => <button key={section.id} className={`toc-item level-${section.level}`} onClick={() => document.getElementById(section.id)?.scrollIntoView({behavior: 'smooth'})}>{section.title}</button>)}</nav></aside>
       {(!layout.leftOpen || layout.focus) && <div className="side-rail"><button title="目录" aria-label="目录" aria-pressed={layout.leftOpen} onClick={() => layout.set({leftOpen: !layout.leftOpen})}><List size={19} /></button></div>}
-      <main className="reading-column">{prefs.toolbarDock !== 'top' && <div className={`docked-tools docked-${prefs.toolbarDock}`}>{toolbar}</div>}<article ref={articleRef} className="reader-scroll" onMouseUp={onTextSelection} onPointerDown={onAreaStart} onPointerUp={onAreaEnd} onPointerCancel={() => {areaStart.current = null;}}><div className="paper-content"><DocumentRenderer document={paper} annotations={annotations} onReference={openReference} /></div></article><div className="reading-progress"><span style={{width: `${progress}%`}} /></div></main>
+      <main className={`reading-column ${splitView && serverId ? 'split-reading' : ''}`}>{splitView && serverId && <PdfPane paper={paper} serverId={serverId} annotations={annotations} scrollRef={pdfRef} style={annotationUI.markStyle} color={prefs.activeColor} noteEnabled={annotationUI.noteEnabled} onAnnotation={record => void addAnnotation(record)} onNotice={setImportStatus} />}{prefs.toolbarDock !== 'top' && <div className={`docked-tools docked-${prefs.toolbarDock}`}>{toolbar}</div>}<article ref={articleRef} className="reader-scroll" onMouseUp={onTextSelection} onPointerDown={onAreaStart} onPointerUp={onAreaEnd} onPointerCancel={() => {areaStart.current = null;}}><div className="paper-content"><DocumentRenderer document={paper} annotations={annotations} onReference={openReference} /></div></article><div className="reading-progress"><span style={{width: `${progress}%`}} /></div></main>
       {(!layout.rightOpen || layout.focus) && <div className="side-rail right-side">{PANELS.map(panel => {const Icon = panel.id === 'references' ? BookOpen : panel.id === 'figures' ? Image : panel.id === 'tables' ? Table2 : StickyNote; return <button key={panel.id} title={panel.label} aria-label={panel.label} aria-pressed={layout.rightOpen && layout.rightPanel === panel.id} onClick={() => layout.set({rightOpen: !(layout.rightOpen && layout.rightPanel === panel.id), rightPanel: panel.id})}><Icon size={18} /></button>;})}</div>}
       <aside className={`right-panel ${layout.rightOpen ? 'open' : ''}`}><div className="panel-tabs">{PANELS.map(panel => <button key={panel.id} className={layout.rightPanel === panel.id ? 'active' : ''} onClick={() => layout.set({rightPanel: panel.id})}>{panel.label}</button>)}<button className="panel-collapse" title="收起面板" aria-label="收起面板" onClick={() => layout.set({rightOpen: false})}><ChevronRight size={16} /></button></div><div className="panel-list">
         {layout.rightPanel === 'references' && (paper.references.length ? paper.references.map(ref => <div className="reference-card" id={`ref-${ref.id}`} key={ref.id}><small>[{ref.number}] {ref.authors}</small><strong>{ref.title}</strong>{referenceDetails(ref) && <span>{referenceDetails(ref)}</span>}{distinctReferencePreview(ref) && <p>{distinctReferencePreview(ref)}</p>}</div>) : <p className="empty-panel">暂无参考文献</p>)}

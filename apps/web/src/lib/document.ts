@@ -19,8 +19,9 @@ export type DocumentModel = {
   source?: string; sourceUrl?: string; arxivId?: string; arxivVersion?: number; fallbackReason?: string;
 };
 export const DOCUMENT_MODEL_VERSION = 3;
-export type TextAnchor = {start: {blockId: string; offset: number}; end: {blockId: string; offset: number}; quote: string; prefix: string; suffix: string};
-export type AreaAnchor = {blockId: string; page: number; bbox: Box; space?: 'page' | 'block'; surface?: 'image'};
+export type PdfRectangle = {page: number; bbox: Box};
+export type TextAnchor = {pdfRects?: PdfRectangle[];start: {blockId: string; offset: number}; end: {blockId: string; offset: number}; quote: string; prefix: string; suffix: string};
+export type AreaAnchor = {pdfOnly?: boolean; pdfRects?: PdfRectangle[];blockId: string; page: number; bbox: Box; space?: 'page' | 'block'; surface?: 'image'};
 export type Annotation = {id: string; documentId: string; type: 'highlight' | 'underline' | 'note' | 'area'; style?: 'highlight' | 'underline'; noteEnabled?: boolean; color: string; anchor: TextAnchor | AreaAnchor; note?: string; createdAt: number; updatedAt?: number};
 export function isTextAnchor(anchor: Annotation['anchor']): anchor is TextAnchor {return 'start' in anchor;}
 export function allBlocks(document: DocumentModel): Block[] {return document.sections.flatMap(section => section.blocks);}
