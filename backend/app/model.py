@@ -3,6 +3,7 @@
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+from .publication import PublicationInfo
 
 DOCUMENT_MODEL_VERSION = 3
 
@@ -91,6 +92,7 @@ class Reference(BaseModel):
 
 
 class Metadata(BaseModel):
+    publication: PublicationInfo | None = None
     title: str = "Untitled paper"
     authors: list[str] = Field(default_factory=list)
     affiliations: list[str] = Field(default_factory=list)

@@ -29,6 +29,7 @@ from .arxiv_source import ArxivSource, fetch_pinned_pdf, official_get
 from .normalizer import finalize_document_model
 from .pdf_pipeline import parse_pdf
 from .vision import configured_provider, transcribe_file
+from .publication import PublicationInfo, api_key as publication_api_key, lookup_publication
 
 APP_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("PAPERLIGHT_DATA_DIR", APP_DIR / "storage" / "documents")).resolve()
@@ -48,6 +49,9 @@ formula_lock = Lock()
 formula_data_lock = Lock()
 formula_active: set[str] = set()
 formula_executor = ThreadPoolExecutor(max_workers=1)
+publication_executor = ThreadPoolExecutor(max_workers=2)
+publication_lock = Lock()
+publication_active: set[str] = set()
 logger = logging.getLogger(__name__)
 ACCOUNTS = AccountStore(Path(os.environ.get("PAPERLIGHT_DB_PATH", DATA_DIR.parent / "paperlight.db")))
 CURRENT_USER: ContextVar[dict[str, Any] | None] = ContextVar("paperlight_user", default=None)
@@ -457,7 +461,12 @@ def list_documents(request: Request) -> list[dict[str, Any]]:
             continue
         try:
             status = json.loads(status_path.read_text(encoding="utf-8"))
-            records.append({"documentId": item["id"], "fingerprint": item["fingerprint"],
+            preview_src = None
+            model_path = folder / "document.json"
+            if model_path.is_file():
+                model_data = json.loads(model_path.read_text(encoding="utf-8"))
+                preview_src = next((figure.get("src") for figure in model_data.get("figures", []) if figure.get("src")), None)
+            records.append({"previewSrc": preview_src, "documentId": item["id"], "fingerprint": item["fingerprint"],
                             "title": item["title"], "status": status.get("status", item["parse_status"]),
                             "parseSource": status.get("parseSource", ""), "arxivId": status.get("arxivId", ""),
                             "arxivVersion": status.get("arxivVersion"),
@@ -692,6 +701,11 @@ def get_document(document_id: str) -> ProcessingStatus:
             if isinstance(document, dict):
                 document.setdefault("modelVersion", 1)
                 model = DocumentModel(**document)
+                publication_path = _document_folder(document_id) / 'publication.json'
+                if publication_path.is_file():
+                    publication = json.loads(publication_path.read_text(encoding='utf-8'))
+                    if publication.get('status') == 'ready':
+                        model.metadata.publication = PublicationInfo(**publication['information'])
                 state["document"] = (model if model.source == "arxiv_html" else finalize_document_model(
                     model, _annotation_block_ids(document_id), _document_folder(document_id))).model_dump()
         except (OSError, json.JSONDecodeError):
@@ -706,6 +720,65 @@ def get_document_model(document_id: str) -> DocumentModel:
     if state.status != "ready" or state.document is None:
         raise HTTPException(status_code=409, detail=state.error or "Document is not ready.")
     return state.document
+
+
+@app.get('/api/documents/{document_id}/publication')
+def get_publication(document_id: str) -> dict[str, Any]:
+    _document_record(document_id)
+    path = _document_folder(document_id) / 'publication.json'
+    if path.is_file():
+        return json.loads(path.read_text(encoding='utf-8'))
+    return {'status': 'missing', 'available': bool(publication_api_key())}
+
+
+@app.post('/api/documents/{document_id}/publication', status_code=202)
+def request_publication(document_id: str) -> dict[str, Any]:
+    record = _document_record(document_id)
+    if record['parse_status'] != 'ready':
+        raise HTTPException(status_code=409, detail='Document is not ready')
+    if not publication_api_key():
+        raise HTTPException(status_code=503, detail='DeepSeek API key is not configured')
+    _ensure_publication_job(document_id)
+    return get_publication(document_id)
+
+
+def _ensure_publication_job(document_id: str) -> None:
+    if not publication_api_key():
+        return
+    with publication_lock:
+        if document_id in publication_active:
+            return
+        path = _document_folder(document_id) / 'publication.json'
+        if path.is_file():
+            current = json.loads(path.read_text(encoding='utf-8'))
+            if current.get('status') == 'ready':
+                return
+        publication_active.add(document_id)
+        _atomic_json(path, {'status': 'processing', 'startedAt': time.time()})
+    publication_executor.submit(_enrich_publication, document_id)
+
+
+def _enrich_publication(document_id: str) -> None:
+    try:
+        record = ACCOUNTS.document(document_id)
+        folder = _document_folder(document_id)
+        model = DocumentModel(**json.loads((folder / 'document.json').read_text(encoding='utf-8')))
+        information, evidence = lookup_publication(model.metadata.title, model.metadata.doi, model.arxivId)
+        current = ACCOUNTS.document(document_id)
+        if not current or current['owner_id'] != record['owner_id'] or not folder.is_dir():
+            return
+        _atomic_json(folder / 'publication.json', {'status': 'ready', 'information': information.model_dump(), 'evidence': evidence})
+        if information.authors:
+            ACCOUNTS.update_document(document_id, status=current["parse_status"], title=current["title"], authors=information.authors, page_count=current["page_count"])
+        with import_lock:
+            _save_result(document_id)
+    except Exception:
+        logger.exception('Publication lookup failed for %s', document_id)
+        if ACCOUNTS.document(document_id):
+            _atomic_json(_document_folder(document_id) / 'publication.json', {'status': 'failed', 'error': '论文信息查询未完成，请稍后重试。'})
+    finally:
+        with publication_lock:
+            publication_active.discard(document_id)
 
 
 def _delete_document_data(document_id: str) -> None:
@@ -862,6 +935,8 @@ def _process_document(document_id: str, filename: str) -> None:
             _save_result(document_id)
     if (_get_job(document_id) or {}).get("formulaStatus") == "processing":
         _ensure_formula_job(document_id)
+    if (_get_job(document_id) or {}).get('status') == 'ready':
+        _ensure_publication_job(document_id)
 
 
 def _ensure_formula_job(document_id: str) -> None:

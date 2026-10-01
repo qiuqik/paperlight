@@ -60,8 +60,9 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(self.admin_client.get("/api/documents").json(), [])
         for path in (f"/api/documents/{doc}", f"/api/documents/{doc}/model",
                      f"/api/documents/{doc}/annotations", f"/api/documents/{doc}/annotation-deletions",
-                     f"/api/documents/{doc}/assets/figure.png", f"/api/documents/{doc}/progress"):
+                     f"/api/documents/{doc}/assets/figure.png", f"/api/documents/{doc}/progress", f"/api/documents/{doc}/publication"):
             self.assertEqual(self.bob_client.get(path).status_code, 404, path)
+        self.assertEqual(self.bob_client.post(f"/api/documents/{doc}/publication").status_code, 404)
         self.assertEqual(self.bob_client.delete(f"/api/documents/{doc}").status_code, 404)
         self.assertEqual(self.alice_client.get(f"/api/documents/{doc}/assets/figure.png").content, b"private-image")
 
@@ -74,6 +75,26 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(self.admin_client.get(f"/api/documents/{doc}/annotations").json()[0]["note"], "private note")
         self.assertEqual(self.admin_client.patch(f"/api/annotations/{note['id']}", json={"note": "admin edit"}).status_code, 200)
         self.assertEqual(self.alice_client.get(f"/api/documents/{doc}/annotations").json()[0]["note"], "admin edit")
+
+    def test_publication_worker_saves_authors_without_changing_paper(self) -> None:
+        from backend.app.publication import PublicationInfo
+        folder = main._document_folder(self.document_id)
+        model_path = folder / "document.json"
+        model = json.loads(model_path.read_text())
+        model["sections"][0].update(id="s1", title="Introduction", level=1)
+        model["sections"][0]["blocks"][0]["type"] = "paragraph"
+        model_path.write_text(json.dumps(model), encoding="utf-8")
+        info = PublicationInfo(authors=["Verified Author"], institutions=["Verified University"])
+        with patch.object(main, "lookup_publication", return_value=(info, {"sources": []})):
+            main._enrich_publication(self.document_id)
+        state = self.alice_client.get(f"/api/documents/{self.document_id}/publication").json()
+        self.assertEqual(state["status"], "ready")
+        self.assertEqual(state["information"]["authors"], ["Verified Author"])
+        record = main.ACCOUNTS.document(self.document_id)
+        self.assertEqual(record["title"], "Private")
+        self.assertEqual(record["parse_status"], "ready")
+        self.assertEqual(json.loads(record["authors"]), ["Verified Author"])
+        self.assertEqual(self.bob_client.get(f"/api/documents/{self.document_id}/publication").status_code, 404)
 
     def test_arxiv_import_route_is_retired(self) -> None:
         response = self.alice_client.post("/api/documents/arxiv", json={"url": "https://arxiv.org/abs/2603.17965v1"})

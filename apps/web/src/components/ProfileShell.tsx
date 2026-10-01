@@ -1,8 +1,7 @@
 'use client';
 
 import {useState} from 'react';
-import {BookOpen} from 'lucide-react';
-import AccountMenu from './AccountMenu';
+import WorkspaceFrame, {AccountNavigation} from './WorkspaceFrame';
 import type {Account} from './AppShell';
 
 export default function ProfileShell({user, onUserChange, onLogout}: {user: Account; onUserChange: (user: Account) => void; onLogout: () => Promise<void>}) {
@@ -31,9 +30,9 @@ export default function ProfileShell({user, onUserChange, onLogout}: {user: Acco
     } catch (error) {setMessage(error instanceof Error ? error.message : '修改密码失败');}
     finally {setBusy(false);}
   };
-  return <div className="library-app"><header className="library-header"><a className="library-brand" href="/"><BookOpen size={22} />Paperlight</a><AccountMenu user={user} onLogout={onLogout} /></header>
-    <main className="account-page"><a className="account-back" href="/">← 返回我的论文</a><h1>个人资料</h1><div className="account-panel"><span className="account-avatar large">{user.display_name.slice(0, 1).toUpperCase()}</span><div><strong>{user.display_name}</strong><p>@{user.username}</p></div></div>
-      <form className="account-panel account-form" onSubmit={event => void saveProfile(event)}><h2>基本信息</h2><label>用户名<input value={user.username} disabled /></label><label>显示名称<input value={name} maxLength={80} onChange={event => setName(event.target.value)} required /></label><label>角色<input value={user.role === 'admin' ? '管理员' : '普通用户'} disabled /></label><label>创建时间<input value={new Date(user.created_at * 1000).toLocaleDateString('zh-CN')} disabled /></label><button disabled={busy} type="submit">保存资料</button></form>
+  return <WorkspaceFrame user={user} onLogout={onLogout} sidebar={<AccountNavigation active="profile" />}>
+    <div className="profile-page"><h1>个人资料</h1>
+      <form className="profile-card" onSubmit={event => void saveProfile(event)}><div className="profile-identity"><span className="account-avatar large">{user.display_name.slice(0, 1).toUpperCase()}</span><div><strong>{user.display_name}</strong><p>@{user.username}</p></div></div><h2>基本信息</h2><dl className="profile-facts"><div><dt>用户名</dt><dd>{user.username}</dd></div><div><dt><label htmlFor="display-name">显示名称</label></dt><dd><input id="display-name" value={name} maxLength={80} onChange={event => setName(event.target.value)} required /></dd></div><div><dt>角色</dt><dd>{user.role === 'admin' ? '管理员' : '普通用户'}</dd></div><div><dt>加入时间</dt><dd>{new Date(user.created_at * 1000).toLocaleDateString('zh-CN')}</dd></div></dl><button className="primary-button" disabled={busy} type="submit">保存资料</button></form>
       <form id="password" className="account-panel account-form" onSubmit={event => void savePassword(event)}><h2>修改密码</h2><label>当前密码<input type="password" autoComplete="current-password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} required /></label><label>新密码<input type="password" autoComplete="new-password" minLength={4} value={newPassword} onChange={event => setNewPassword(event.target.value)} required /></label><p>至少 4 位，可以使用纯数字。修改后需要重新登录。</p><button disabled={busy} type="submit">修改密码</button></form>
-      {message && <p role="status" className="account-message">{message}</p>}</main></div>;
+      {message && <p role="status" className="account-message">{message}</p>}</div></WorkspaceFrame>;
 }

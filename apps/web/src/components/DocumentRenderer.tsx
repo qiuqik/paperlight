@@ -4,6 +4,7 @@ import {createPortal} from 'react-dom';
 import katex from 'katex';
 import type {Annotation, Block, DocumentModel, InlineNode, PageGeometry, Section} from '@/lib/document';
 import {isTextAnchor} from '@/lib/document';
+import PaperIdentity from './PaperIdentity';
 
 function renderedLatex(latex: string, displayMode: boolean) {
   let expression = latex.trim();
@@ -144,7 +145,7 @@ function SectionView({section, annotations, pages, onReference, pdfUrl, arxivHtm
 export default function DocumentRenderer({document: paper, annotations, onReference}: {document: DocumentModel; annotations: Annotation[]; onReference: (id: string) => void}) {
   const pdfUrl = paper.source && paper.source !== 'arxiv_html' ? `/api/parser/api/documents/${paper.id}/original.pdf` : undefined;
   return <>
-    <header className="paper-header"><div className="eyebrow">{paper.arxivId ? `ARXIV · ${paper.arxivId}v${paper.arxivVersion} · ${paper.source === 'arxiv_html' ? '官方 HTML' : 'PDF 原文'}` : `PAPERLIGHT · ${paper.metadata.pageCount || '—'} PAGES`}</div><h1>{paper.metadata.title}</h1><div className="paper-authors"><p className="authors">{paper.metadata.authors.join(' · ')}</p>{paper.metadata.affiliations?.map((value, index) => <p className="author-detail" key={`affiliation-${index}`}>{value}</p>)}{paper.metadata.authorNotes?.map((value, index) => <p className="author-detail" key={`note-${index}`}>{value}</p>)}</div>{paper.metadata.venue && <p className="venue">{paper.metadata.venue} {paper.metadata.year || ''}</p>}{paper.fallbackReason && <p className="source-notice">官方 HTML 不完整，已使用固定版本的 PDF。</p>}</header>
+    <header className="paper-header"><div className="eyebrow">{paper.arxivId ? `ARXIV · ${paper.arxivId}v${paper.arxivVersion} · ${paper.source === 'arxiv_html' ? '官方 HTML' : 'PDF 原文'}` : `PAPERLIGHT · ${paper.metadata.pageCount || '—'} PAGES`}</div><h1>{paper.metadata.title}</h1><PaperIdentity key={paper.id} paper={paper} />{paper.fallbackReason && <p className="source-notice">官方 HTML 不完整，已使用固定版本的 PDF。</p>}</header>
     {paper.sections.map(section => <SectionView key={section.id} section={section} annotations={annotations} pages={paper.pages || []} onReference={onReference} pdfUrl={pdfUrl} arxivHtml={paper.source === 'arxiv_html'} />)}
   </>;
 }
