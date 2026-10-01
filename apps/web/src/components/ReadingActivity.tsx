@@ -21,13 +21,13 @@ export default function ReadingActivity({userId}: {userId: string}) {
 
   return <section className={styles.panel} aria-label="阅读时间">
     <div className={styles.heading}><div><span className={styles.eyebrow}>YOUR READING RHYTHM</span><h2>每一页，都算数。</h2></div><span className={styles.period}><ChartColumn size={15} />阅读概览</span></div>
-    <div className={styles.body}><div className={styles.metrics}>
+    <div className={styles.dashboard}><div className={styles.metrics}>
       <div><span><Clock3 size={13} />今天阅读</span><strong>{data ? duration(today) : '—'}</strong></div>
       <div><span>最近 7 天</span><strong>{data ? duration(week) : '—'}</strong></div>
       <div><span>累计阅读</span><strong>{data ? duration(data.totalSeconds) : '—'}</strong></div>
       <div><span>阅读天数</span><strong>{data ? data.activeDays : '—'}<small> 天</small></strong></div>
-    </div></div>
-    <div className={styles.chartHeading}><div><span>阅读时长</span><strong>{data ? duration(total) : '—'}</strong><small>{range === 84 ? '近 12 周' : `近 ${range} 天`}累计</small></div><div className={styles.range} aria-label="阅读统计范围">{[{days:7,label:'近 7 天'},{days:30,label:'近 30 天'},{days:84,label:'近 12 周'}].map(option=><button key={option.days} aria-pressed={range===option.days} onClick={()=>{setRange(option.days);setSelected(null);setHovered(null);}}>{option.label}</button>)}</div></div>
+    </div>
+    <div className={styles.chartPanel}><div className={styles.chartHeading}><div><span>阅读时长</span><strong>{data ? duration(total) : '—'}</strong><small>{range === 84 ? '近 12 周' : `近 ${range} 天`}累计</small></div><div className={styles.range} aria-label="阅读统计范围">{[{days:7,label:'近 7 天'},{days:30,label:'近 30 天'},{days:84,label:'近 12 周'}].map(option=><button key={option.days} aria-pressed={range===option.days} onClick={()=>{setRange(option.days);setSelected(null);setHovered(null);}}>{option.label}</button>)}</div></div>
     <div className={styles.chartScroll}><div className={styles.chart} data-range={range} role="group" aria-label="每日阅读时长柱状图">
       <div className={styles.gridLines} aria-hidden="true"><span/><span/><span/></div>
       {visible.map((day,index)=><div className={styles.column} key={day.date}>
@@ -38,7 +38,7 @@ export default function ReadingActivity({userId}: {userId: string}) {
         <span className={styles.date}>{range===7 ? day.date.slice(5) : range===30 ? Number(day.date.slice(-2)) : (index%7===0 || index===visible.length-1) ? day.date.slice(5) : ''}</span>
       </div>)}
       {!data && <p className={styles.chartEmpty}>{error ? '暂时无法加载阅读记录' : '正在加载阅读记录…'}</p>}
-    </div></div>
+    </div></div></div></div>
     <p className={styles.caption}>{error ? '阅读记录暂时无法加载，请刷新重试。' : chosen ? `${chosen.date} · 阅读 ${duration(chosen.seconds)}` : data?.totalSeconds ? '留一点时间，读一篇好论文。' : '从今天开始，留下你的阅读足迹。'}<ArrowUpRight size={14}/></p>
   </section>;
 }
