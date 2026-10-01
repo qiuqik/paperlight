@@ -11,6 +11,7 @@ import demo from '@/data/demo.json';
 import type {Annotation, AreaAnchor, DocumentModel, Reference} from '@/lib/document';
 import {allBlocks, isTextAnchor, resolveAssetSources} from '@/lib/document';
 import {captureAnchor, renderTextHighlights, resolveAnchor} from '@/lib/anchors';
+import {useReadingActivity} from '@/lib/useReadingActivity';
 import {useAnnotationUI, useLayout, usePreferences, type MarkStyle, type RightPanel} from '@/lib/stores';
 
 const SAMPLE = resolveAssetSources(demo as DocumentModel);
@@ -48,6 +49,7 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
   const [paper, setPaper] = useState<DocumentModel>(SAMPLE);
   const [localId, setLocalId] = useState(SAMPLE.id);
   const [serverId, setServerId] = useState<string | undefined>();
+  useReadingActivity(serverId, user.id);
   const [viewingOwner, setViewingOwner] = useState('');
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [importStatus, setImportStatus] = useState('');

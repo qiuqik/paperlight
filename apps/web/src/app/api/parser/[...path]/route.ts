@@ -6,7 +6,7 @@ type Context = {params: Promise<{path: string[]}>};
 
 async function proxy(request: NextRequest, {params}: Context) {
   const {path} = await params;
-  const allowed = (path[0] === 'api' && ['documents', 'library', 'annotations', 'auth', 'admin', 'settings', 'profile'].includes(path[1]))
+  const allowed = (path[0] === 'api' && ['documents', 'library', 'annotations', 'auth', 'admin', 'settings', 'profile', 'activity'].includes(path[1]))
     || (path[0] === 'parser' && path[1] === 'jobs');
   if (!allowed) return new Response('Not found', {status: 404});
   const origin = request.headers.get('origin');

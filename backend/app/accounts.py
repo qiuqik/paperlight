@@ -79,6 +79,13 @@ class AccountStore:
                     user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
                     settings_json TEXT NOT NULL DEFAULT '{}', updated_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS reading_activity (
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    event_id TEXT NOT NULL, document_id TEXT REFERENCES documents(id) ON DELETE SET NULL,
+                    day TEXT NOT NULL, seconds INTEGER NOT NULL CHECK(seconds BETWEEN 1 AND 60),
+                    PRIMARY KEY(user_id, event_id)
+                );
+                CREATE INDEX IF NOT EXISTS reading_activity_user_day ON reading_activity(user_id,day);
             """)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(documents)")}
             if "favorite" not in columns:

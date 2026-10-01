@@ -2,6 +2,11 @@ import type {Metadata} from 'next';
 import 'katex/dist/katex.min.css';
 import './globals.css';
 import './workspace.css';
+import './library.css';
+import './account-pages.css';
+import './administration.css';
+import './reader-chrome.css';
+import './workspace-theme.css';
 
 export const metadata: Metadata = {
   title: 'Paperlight',

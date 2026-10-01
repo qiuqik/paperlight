@@ -50,6 +50,29 @@ class AccountApiTests(unittest.TestCase):
         main.jobs.clear()
         self.temp.cleanup()
 
+    def test_reading_activity_is_private_idempotent_and_survives_paper_deletion(self) -> None:
+        from datetime import date
+        today = date.today().isoformat()
+        payload = {'eventId': '11111111-1111-4111-8111-111111111111', 'documentId': self.document_id, 'day': today, 'seconds': 30}
+        self.assertEqual(self.bob_client.post('/api/activity', json=payload).status_code, 404)
+        for _ in range(2):
+            self.assertEqual(self.alice_client.post('/api/activity', json=payload).status_code, 204)
+        result = self.alice_client.get(f'/api/activity?today={today}').json()
+        self.assertEqual(result['totalSeconds'], 30)
+        self.assertEqual(result['activeDays'], 1)
+        self.assertEqual(len(result['days']), 84)
+        self.assertEqual(self.bob_client.get(f'/api/activity?today={today}').json()['totalSeconds'], 0)
+        self.assertEqual(self.admin_client.get(f'/api/activity?today={today}').json()['totalSeconds'], 0)
+        self.assertEqual(TestClient(main.app).get(f'/api/activity?today={today}').status_code, 401)
+        self.assertEqual(self.alice_client.delete(f'/api/documents/{self.document_id}').status_code, 204)
+        self.assertEqual(self.alice_client.get(f'/api/activity?today={today}').json()['totalSeconds'], 30)
+
+    def test_reading_activity_rejects_invalid_intervals_and_dates(self) -> None:
+        payload = {'eventId': '11111111-1111-4111-8111-111111111111', 'documentId': self.document_id, 'day': '2000-01-01', 'seconds': 30}
+        self.assertEqual(self.alice_client.post('/api/activity', json=payload).status_code, 422)
+        self.assertEqual(self.alice_client.post('/api/activity', json={**payload, 'seconds': 1000}).status_code, 422)
+        self.assertEqual(self.alice_client.get('/api/activity?today=2000-01-01').status_code, 422)
+
     def test_pdf_ranges_and_cache_revalidation_still_require_ownership(self) -> None:
         folder = main._document_folder(self.document_id)
         (folder / 'original.pdf').write_bytes(b'%PDF-private-document')

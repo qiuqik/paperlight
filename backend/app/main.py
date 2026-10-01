@@ -23,6 +23,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from .accounts import AccountStore
+from .reading_activity import ReadingTick, record_tick, summary as reading_summary
+from datetime import date
 from .model import DOCUMENT_MODEL_VERSION, DocumentModel, ProcessingStatus
 from .arxiv_html import parse_arxiv_html
 from .arxiv_source import ArxivSource, fetch_pinned_pdf, official_get
@@ -190,6 +192,24 @@ def change_password(changes: dict[str, Any]) -> None:
 @app.get("/api/settings")
 def get_settings() -> dict[str, Any]:
     return ACCOUNTS.settings(_user()["id"])
+
+
+@app.get('/api/activity')
+def get_reading_activity(today: date) -> dict:
+    try:
+        return reading_summary(ACCOUNTS, _user()['id'], today)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post('/api/activity', status_code=204)
+def save_reading_activity(tick: ReadingTick) -> Response:
+    _document_record(tick.documentId)
+    try:
+        record_tick(ACCOUNTS, _user()['id'], tick)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return Response(status_code=204)
 
 
 @app.put("/api/settings")
