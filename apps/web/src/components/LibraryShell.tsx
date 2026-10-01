@@ -1,4 +1,7 @@
 'use client';
+import Link from 'next/link';
+import {useRouter} from 'next/navigation';
+import {readWorkspaceCache, writeWorkspaceCache} from '@/lib/workspaceCache';
 
 import {useCallback, useEffect, useRef, useState} from 'react';
 import {BookOpen, ChevronRight, Clock3, FileText, Grid2X2, List, Plus, Search, Settings2, Star, Trash2} from 'lucide-react';
@@ -15,10 +18,12 @@ const stages: Record<string, string> = {queued: '等待解析', loading_parser: 
 const dateLabel = (timestamp?: number) => timestamp ? new Date(timestamp * 1000).toLocaleDateString('zh-CN') : '尚未阅读';
 
 export default function LibraryShell({user, onLogout}: {user: Account; onLogout: () => Promise<void>}) {
-  const [papers, setPapers] = useState<Paper[]>([]);
+  const router = useRouter();
+  const cacheKey = `papers:${user.id}`;
+  const [papers, setPapers] = useState<Paper[]>(() => readWorkspaceCache<Paper[]>(cacheKey) || []);
   const [section, setSection] = useState<Section>('all');
   const [query, setQuery] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !readWorkspaceCache<Paper[]>(cacheKey));
   const [message, setMessage] = useState('');
   const [uploading, setUploading] = useState(false);
   const [sort, setSort] = useState('recent');
@@ -33,6 +38,8 @@ export default function LibraryShell({user, onLogout}: {user: Account; onLogout:
   }, []);
   useEffect(() => {void refresh().catch(error => setMessage(error.message)).finally(() => setLoading(false));}, [refresh]);
 
+
+  useEffect(() => {if (!loading) writeWorkspaceCache(cacheKey, papers);}, [cacheKey, papers, loading]);
 
   const finishImport = async (response: Response) => {
     if (!response.ok) {
@@ -49,7 +56,7 @@ export default function LibraryShell({user, onLogout}: {user: Account; onLogout:
     }
     await refresh();
     if (state.status !== 'ready') throw new Error(state.error || '解析未完成');
-    window.location.assign(`/reader/${state.documentId}`);
+    router.push(`/reader/${state.documentId}`);
   };
   const importPdf = async (file?: File) => {
     if (!file) return;
@@ -78,12 +85,12 @@ export default function LibraryShell({user, onLogout}: {user: Account; onLogout:
   const filtered = source.filter(item => `${item.title} ${item.authors.join(' ')}`.toLowerCase().includes(query.trim().toLowerCase())).sort((a, b) => sort === 'title' ? a.title.localeCompare(b.title) : sort === 'added' ? b.createdAt - a.createdAt : (b.lastOpenedAt || b.createdAt) - (a.lastOpenedAt || a.createdAt));
   const open = (paper: Paper) => {
     if (paper.status !== 'ready') {setMessage(paper.status === 'failed' ? '这篇论文解析失败，请重新导入。' : '这篇论文仍在解析，请稍后刷新页面。'); return;}
-    window.location.assign(`/reader/${paper.documentId}`);
+    router.push(`/reader/${paper.documentId}`);
   };
   const hour = new Date().getHours();
   const greeting = hour < 12 ? '早上好' : hour < 18 ? '下午好' : '晚上好';
   const search = <label className="workspace-search"><Search size={16} /><input aria-label="搜索论文" placeholder="搜索论文标题、作者…" value={query} onChange={event => setQuery(event.target.value)} /></label>;
-  const sidebar = <nav className="workspace-sidebar" aria-label="论文库导航"><button className={section === 'all' ? 'selected' : ''} onClick={() => setSection('all')}><BookOpen size={18} />我的论文</button><button className={section === 'recent' ? 'selected' : ''} onClick={() => setSection('recent')}><Clock3 size={18} />最近阅读</button><button className={section === 'favorites' ? 'selected' : ''} onClick={() => setSection('favorites')}><Star size={18} />收藏</button><a className="sidebar-bottom" href="/settings"><Settings2 size={18} />阅读设置</a></nav>;
+  const sidebar = <nav className="workspace-sidebar" aria-label="论文库导航"><button className={section === 'all' ? 'selected' : ''} onClick={() => setSection('all')}><BookOpen size={18} />我的论文</button><button className={section === 'recent' ? 'selected' : ''} onClick={() => setSection('recent')}><Clock3 size={18} />最近阅读</button><button className={section === 'favorites' ? 'selected' : ''} onClick={() => setSection('favorites')}><Star size={18} />收藏</button><Link className="sidebar-bottom" href="/settings"><Settings2 size={18} />阅读设置</Link></nav>;
   return <WorkspaceFrame user={user} onLogout={onLogout} sidebar={sidebar}>
     <div className="library-welcome"><div><h1>{greeting}，{user.display_name}</h1><p>继续探索你的研究世界。</p></div><button className="primary-button" disabled={uploading} onClick={() => picker.current?.click()}><Plus size={17} />导入 PDF</button></div>
     {section === 'all' && <ReadingActivity userId={user.id} />}

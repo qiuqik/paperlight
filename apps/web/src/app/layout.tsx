@@ -10,6 +10,7 @@ import './workspace-theme.css';
 
 export const metadata: Metadata = {
   title: 'Paperlight',
+  icons: {icon: '/icon.svg?v=monochrome'},
   description: '结构化论文阅读器',
 };
 

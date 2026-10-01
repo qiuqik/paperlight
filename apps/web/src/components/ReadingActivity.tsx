@@ -1,4 +1,5 @@
 'use client';
+import {readWorkspaceCache, writeWorkspaceCache} from '@/lib/workspaceCache';
 import {useEffect, useState} from 'react';
 import {Clock3, CalendarDays, ArrowUpRight} from 'lucide-react';
 import {localDay} from '@/lib/useReadingActivity';
@@ -7,8 +8,8 @@ import styles from './ReadingActivity.module.css';
 type Summary = {totalSeconds: number; activeDays: number; days: Array<{date: string; seconds: number}>};
 const duration = (seconds: number) => seconds < 60 ? `${Math.floor(seconds)} 秒` : seconds < 3600 ? `${Math.floor(seconds/60)} 分钟` : `${(seconds/3600).toFixed(1)} 小时`;
 export default function ReadingActivity({userId}: {userId: string}) {
-  const [data,setData] = useState<Summary | null>(null), [error,setError] = useState(false), [selected,setSelected] = useState<string | null>(null);
-  useEffect(() => {let active=true;void fetch(`/api/parser/api/activity?today=${localDay()}`,{cache:'no-store'}).then(async response=>{if(!response.ok)throw new Error();const result=await response.json() as Summary;if(active)setData(result);}).catch(()=>{if(active)setError(true);});return()=>{active=false;};},[userId]);
+  const [data,setData] = useState<Summary | null>(() => readWorkspaceCache<Summary>(`activity:${userId}:${localDay()}`) || null), [error,setError] = useState(false), [selected,setSelected] = useState<string | null>(null);
+  useEffect(() => {let active=true;void fetch(`/api/parser/api/activity?today=${localDay()}`,{cache:'no-store'}).then(async response=>{if(!response.ok)throw new Error();const result=await response.json() as Summary;if(active){writeWorkspaceCache(`activity:${userId}:${localDay()}`,result);setData(result);}}).catch(()=>{if(active)setError(true);});return()=>{active=false;};},[userId]);
   const days = data?.days || [], today = days.at(-1)?.seconds || 0, week = days.slice(-7).reduce((sum,day)=>sum+day.seconds,0);
   const chosen = days.find(day=>day.date===selected);
   const padding = days.length ? (new Date(`${days[0].date}T12:00:00`).getDay()+6)%7 : 0;

@@ -1,4 +1,5 @@
 'use client';
+import Link from 'next/link';
 
 import {useEffect, useRef, useState} from 'react';
 import {ChevronDown, LogOut, Settings2, Shield, UserRound} from 'lucide-react';
@@ -18,10 +19,10 @@ export default function AccountMenu({user, onLogout}: {user: Account; onLogout: 
   return <div className="account-menu" ref={root}>
     <button className="account-trigger" type="button" aria-expanded={open} aria-label="账号菜单" onClick={() => setOpen(value => !value)}><span className="account-avatar">{user.display_name.slice(0, 1).toUpperCase()}</span><span>{user.display_name}</span><ChevronDown size={15} /></button>
     {open && <div className="account-popover" role="menu"><div className="account-summary"><strong>{user.display_name}</strong><small>@{user.username}</small></div>
-      <a role="menuitem" href="/profile"><UserRound size={16} />个人资料</a>
-      <a role="menuitem" href="/settings"><Settings2 size={16} />阅读设置</a>
-      <a role="menuitem" href="/profile#password"><UserRound size={16} />修改密码</a>
-      {user.role === 'admin' && <a role="menuitem" href="/admin"><Shield size={16} />管理后台</a>}
+      <Link onClick={() => setOpen(false)} role="menuitem" href="/profile"><UserRound size={16} />个人资料</Link>
+      <Link onClick={() => setOpen(false)} role="menuitem" href="/settings"><Settings2 size={16} />阅读设置</Link>
+      <Link onClick={() => setOpen(false)} role="menuitem" href="/profile#password"><UserRound size={16} />修改密码</Link>
+      {user.role === 'admin' && <Link onClick={() => setOpen(false)} role="menuitem" href="/admin"><Shield size={16} />管理后台</Link>}
       <button role="menuitem" type="button" onClick={() => void onLogout()}><LogOut size={16} />退出登录</button>
     </div>}
   </div>;
