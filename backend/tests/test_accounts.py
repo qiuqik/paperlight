@@ -50,6 +50,59 @@ class AccountApiTests(unittest.TestCase):
         main.jobs.clear()
         self.temp.cleanup()
 
+    def test_public_registration_logs_in_as_user_and_keeps_library_private(self):
+        client = TestClient(main.app)
+        response = client.post('/api/auth/register', json={
+            'username': 'new_reader', 'password': 'new-password',
+            'confirmPassword': 'new-password', 'role': 'admin',
+        }, headers={'x-forwarded-proto': 'https'})
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()['role'], 'user')
+        self.assertNotIn('password_hash', response.json())
+        self.assertIn('httponly', response.headers['set-cookie'].lower())
+        self.assertIn('secure', response.headers['set-cookie'].lower())
+        # HTTPS-only cookie is deliberately not sent by the HTTP test client.
+        self.assertEqual(client.get('/api/auth/me').status_code, 401)
+        login = client.post('/api/auth/login', json={'username': 'new_reader', 'password': 'new-password'})
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(client.get('/api/auth/me').json()['username'], 'new_reader')
+        self.assertEqual(client.get('/api/documents').json(), [])
+        self.assertEqual(client.get('/api/admin/users').status_code, 403)
+        self.assertEqual(client.get(f'/api/documents/{self.document_id}').status_code, 404)
+
+    def test_registration_rejects_duplicates_mismatch_and_invalid_fields(self):
+        client = TestClient(main.app)
+        before = main.ACCOUNTS.user_count()
+        payload = {'username': 'ALICE', 'password': 'valid-password', 'confirmPassword': 'valid-password'}
+        self.assertEqual(client.post('/api/auth/register', json=payload).status_code, 409)
+        for changes in ({'username': 'new_reader', 'confirmPassword': 'different'},
+                        {'username': 'x'}, {'username': 'bad/name'},
+                        {'password': 'abc', 'confirmPassword': 'abc'}, {'password': None}):
+            self.assertEqual(client.post('/api/auth/register', json={**payload, **changes}).status_code, 422)
+        self.assertEqual(client.post('/api/auth/register', json={'username': 'new_reader', 'password': 'valid-password'}).status_code, 422)
+        self.assertEqual(main.ACCOUNTS.user_count(), before)
+        self.assertEqual(client.get('/api/auth/me').status_code, 401)
+
+    def test_registration_session_is_immediately_usable(self):
+        client = TestClient(main.app)
+        response = client.post('/api/auth/register', json={
+            'username': 'reader_two', 'password': 'reader-password', 'confirmPassword': 'reader-password'})
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(client.get('/api/auth/me').json()['id'], response.json()['id'])
+        self.assertEqual(client.get('/api/documents').json(), [])
+        client.post('/api/auth/logout')
+        self.assertEqual(client.get('/api/auth/me').status_code, 401)
+    def test_restart_resumes_only_processing_documents(self):
+        main.ACCOUNTS.update_document(self.document_id, status="processing")
+        with patch.object(main, "_queue_document") as queue:
+            main._resume_documents()
+            queue.assert_called_once_with(self.document_id, "private.pdf")
+        self.assertEqual(main._get_job(self.document_id)["stage"], "queued")
+        main.ACCOUNTS.update_document(self.document_id, status="ready")
+        with patch.object(main, "_queue_document") as queue:
+            main._resume_documents()
+            queue.assert_not_called()
+
     def test_library_tags_are_private_validated_and_independent_of_publication(self) -> None:
         endpoint = f"/api/documents/{self.document_id}/tags"
         tags = {"venue": "TVCG2026", "publishDate": "2026-08-25", "institutions": ["浙江大学", "浙江大学"], "other": [" 待精读 "]}

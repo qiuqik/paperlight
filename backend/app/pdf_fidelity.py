@@ -99,7 +99,8 @@ def _overlaps(first: dict[str, float], second: tuple[float, float, float, float]
     return min(first["x"] + first["width"], right) > max(first["x"], left) and min(first["y"] + first["height"], bottom) > max(first["y"], top)
 
 
-def _crop(pdf: Any, page_number: int, box: dict[str, float], target: Path, margin: float = 2) -> bool:
+def _crop(pdf: Any, page_number: int, box: dict[str, float], target: Path, margin: float = 2,
+          omit: list[tuple[float, float, float, float]] | None = None) -> bool:
     try:
         page = pdf[page_number - 1]
         width, height = page.get_size()
@@ -111,6 +112,11 @@ def _crop(pdf: Any, page_number: int, box: dict[str, float], target: Path, margi
         if right <= left or bottom <= top:
             return False
         image = page.render(scale=scale, crop=(left, height - bottom, width - right, top)).to_pil()
+        # A panel legend can extend into a column gutter. Omit an adjacent
+        # caption in that gutter without truncating the legend above it.
+        for rect in omit or []:
+            image.paste('white', (max(0,int((rect[0]-left-1)*scale)),max(0,int((rect[1]-top-1)*scale)),
+                                 min(image.width,int((rect[2]-left+1)*scale)+1),min(image.height,int((rect[3]-top+1)*scale)+1)))
         target.parent.mkdir(parents=True, exist_ok=True)
         image.save(target, format="PNG")
         return True
@@ -118,7 +124,28 @@ def _crop(pdf: Any, page_number: int, box: dict[str, float], target: Path, margi
         return False
 
 
-def recover_missing_pdf_figures(model: DocumentModel, pdf_path: Path, folder: Path) -> int:
+def pdf_figure_caption_blocks(page: Any) -> list:
+    """Find captions even when the PDF groups them with the diagram above."""
+    entries = page.get_text('blocks')
+    found = []
+    for entry in entries:
+        if re.match(r'^Fig(?:ure)?\.?\s*\d+\s*[:.]',entry[4],re.I):
+            found.append(entry)
+    for block in page.get_text('dict')['blocks']:
+        lines = block.get('lines',[])
+        for index,line in enumerate(lines):
+            text = ''.join(s['text'] for s in line['spans']).strip()
+            if index == 0 or not re.match(r'^Fig(?:ure)?\.?\s*\d+\s*[:.]',text,re.I):
+                continue
+            tail = lines[index:]
+            found.append((min(l['bbox'][0] for l in tail),min(l['bbox'][1] for l in tail),
+                          max(l['bbox'][2] for l in tail),max(l['bbox'][3] for l in tail),
+                          ' '.join(''.join(s['text'] for s in l['spans']) for l in tail),0,0))
+    return found
+
+
+def recover_missing_pdf_figures(model: DocumentModel, pdf_path: Path, folder: Path,
+                               protected_block_ids: set[str] | None = None) -> int:
     """Recover only wide image groups with an explicit Fig. caption in the PDF.
 
     PDF publishers sometimes flatten a table-like figure into adjacent image tiles.
@@ -133,6 +160,7 @@ def recover_missing_pdf_figures(model: DocumentModel, pdf_path: Path, folder: Pa
     from .normalizer import _numbered_citations, clean_text
 
     existing = {figure.number for figure in model.figures if figure.number is not None}
+    protected = protected_block_ids or set()
     recovered = 0
     with pymupdf.open(pdf_path) as geometry:
         raster = pdfium.PdfDocument(str(pdf_path))
@@ -141,13 +169,29 @@ def recover_missing_pdf_figures(model: DocumentModel, pdf_path: Path, folder: Pa
                 images = [tuple(info["bbox"]) for info in page.get_image_info()
                           if info["bbox"][2] - info["bbox"][0] >= 25
                           and info["bbox"][3] - info["bbox"][1] >= 25]
-                for caption_box in page.get_text("blocks"):
+                for caption_box in pdf_figure_caption_blocks(page):
                     caption = clean_text(caption_box[4])
                     match = re.match(r"^Fig(?:ure)?\.?(?:\s*)(\d+)\s*[:.]\s*(.+)", caption, re.I)
                     if not match:
                         continue
                     number = int(match.group(1))
-                    if number in existing or caption_box[1] > page.rect.height * .45:
+                    if number in existing:
+                        continue
+                    # A schema panel can be labeled as code rather than a
+                    # picture. Keep its anchor and crop, but expose its caption
+                    # and figure number so in-text navigation works.
+                    schema = next((b for s in model.sections for b in s.blocks if
+                                   b.type=='code' and b.src and b.page==page_index+1 and b.bbox
+                                   and b.id not in protected and -3<=caption_box[1]-b.bbox['y']-b.bbox['height']<=35
+                                   and min(caption_box[2],b.bbox['x']+b.bbox['width'])-max(caption_box[0],b.bbox['x'])
+                                   >.35*min(caption_box[2]-caption_box[0],b.bbox['width'])),None)
+                    if schema:
+                        schema.type,schema.number,schema.label = 'figure',number,f'Figure {number}'
+                        schema.caption = match.group(2)
+                        schema.captionContent = _numbered_citations(schema.caption,model.references)
+                        model.figures.append(schema)
+                        existing.add(number)
+                        recovered += 1
                         continue
                     anonymous = next((figure for figure in model.figures
                                       if figure.number is None and figure.page == page_index + 1
@@ -172,7 +216,8 @@ def recover_missing_pdf_figures(model: DocumentModel, pdf_path: Path, folder: Pa
                         existing.add(number)
                         recovered += 1
                         continue
-                    nearby = [box for box in images if 0 <= caption_box[1] - box[3] <= 35]
+                    nearby = [box for box in images if 0 <= caption_box[1] - box[3] <= 35
+                              and min(box[2], caption_box[2]) - max(box[0], caption_box[0]) > 0]
                     if nearby:
                         anchor = max(nearby, key=lambda box: box[2] - box[0])
                         group = [box for box in nearby if abs(box[1] - anchor[1]) <= 18]
@@ -180,16 +225,24 @@ def recover_missing_pdf_figures(model: DocumentModel, pdf_path: Path, folder: Pa
                         top = min(box[1] for box in group)
                         right = max(box[2] for box in group)
                         bottom = max(box[3] for box in group)
-                        if right - left < page.rect.width * .55 or bottom > caption_box[1] - 2:
+                        if right - left < page.rect.width * .18 or bottom > caption_box[1] - 2:
                             continue
                     else:
                         # Plots may be PDF vector drawings rather than embedded images.
                         side_left = page.rect.width / 2 if caption_box[0] > page.rect.width / 2 else 0
                         side_right = page.rect.width if side_left else page.rect.width / 2
+                        # Another figure's caption or a body paragraph is a hard
+                        # boundary. A fixed look-back window can mix two stacked plots.
+                        boundary = max((entry[3] + 2 for entry in page.get_text("blocks")
+                                        if entry[3] < caption_box[1] - 3
+                                        and min(entry[2], caption_box[2]) - max(entry[0], caption_box[0]) > 30
+                                        and (re.match(r"^Fig(?:ure)?\.?\s*\d+\s*[:.]", clean_text(entry[4]), re.I)
+                                             or len(clean_text(entry[4])) > 160)), default=0)
+                        floor = max(boundary, caption_box[1] - 450)
                         drawings = [tuple(drawing["rect"]) for drawing in page.get_drawings()
                                     if drawing["rect"].x0 >= side_left - 3
                                     and drawing["rect"].x1 <= side_right + 3
-                                    and caption_box[1] - 200 <= drawing["rect"].y0
+                                    and floor <= drawing["rect"].y0
                                     and drawing["rect"].y1 <= caption_box[1] - 2
                                     and drawing["rect"].width > 2 and drawing["rect"].height > 1]
                         if not drawings:
@@ -198,9 +251,14 @@ def recover_missing_pdf_figures(model: DocumentModel, pdf_path: Path, folder: Pa
                         top = min(box[1] for box in drawings)
                         right = max(box[2] for box in drawings)
                         bottom = max(box[3] for box in drawings)
-                        if (right - left < page.rect.width * .35 or bottom - top < 60
+                        if (right - left < page.rect.width * .25 or bottom - top < 60
                                 or caption_box[1] - bottom > 35):
                             continue
+                        for entry in page.get_text("blocks"):
+                            if (entry[0] >= side_left and entry[2] <= side_right
+                                    and max(floor, top - 20) <= entry[1] and entry[3] < caption_box[1] - 2):
+                                left, top = min(left, entry[0]), min(top, entry[1])
+                                right, bottom = max(right, entry[2]), max(bottom, entry[3])
                     box = {"x": left, "y": top, "width": right - left, "height": bottom - top}
                     asset = folder / "assets" / f"recovered_figure_{number}.png"
                     if not _crop(raster, page_index + 1, box, asset):
@@ -482,6 +540,134 @@ def trim_abstract_figure_labels(model: DocumentModel, pdf_path: Path) -> int:
                 block.text = block.text[offset:]
                 block.content = _numbered_citations(block.text, model.references)
                 changed += 1
+    return changed
+
+
+def expand_pdf_figure_crops(model: DocumentModel, pdf_path: Path, folder: Path,
+                            protected_block_ids: set[str] | None = None) -> int:
+    """Restore upper panels and axis labels omitted from a caption's picture box."""
+    import pymupdf
+    import pypdfium2 as pdfium
+    from .normalizer import clean_text
+    protected = protected_block_ids or set()
+    changed = 0
+    with pymupdf.open(pdf_path) as pdf:
+        raster = pdfium.PdfDocument(str(pdf_path))
+        try:
+            for figure in list(model.figures):
+                if not figure.number or not figure.page or not figure.bbox or figure.id in protected:
+                    continue
+                page = pdf[figure.page-1]
+                captions = [entry for entry in page.get_text('blocks') if re.match(
+                    rf'^Fig(?:ure)?\.?\s*{figure.number}\s*[:.]',clean_text(entry[4]),re.I)]
+                if len(captions) != 1:
+                    continue
+                caption = captions[0]
+                box = figure.bbox
+                if caption[1] < box['y'] + box['height'] - 5 or caption[1] - box['y'] - box['height'] > 60:
+                    continue
+                wide = caption[2]-caption[0] > page.rect.width*.55
+                left_column = caption[0] < page.rect.width/2
+                left = 0 if wide or left_column else page.rect.width/2 - 30
+                right = page.rect.width if wide or not left_column else page.rect.width/2 + 30
+                boundaries = [entry[3]+2 for entry in page.get_text('blocks')
+                              if entry[3] < box['y'] and min(entry[2],caption[2])-max(entry[0],caption[0]) > 30
+                              and (re.match(r'^(?:Fig(?:ure)?\.?|Table)\s*\d+\s*[:.]',clean_text(entry[4]),re.I)
+                                   or len(clean_text(entry[4])) > 200)]
+                for entry in page.get_text('dict')['blocks']:
+                    spans = [span for line in entry.get('lines',[]) for span in line['spans']]
+                    if (spans and entry['bbox'][3] < box['y'] and max(s['size'] for s in spans)>=9
+                            and sum(len(s['text']) for s in spans)>20 and entry['bbox'][2]-entry['bbox'][0]>80
+                            and min(entry['bbox'][2],caption[2])-max(entry['bbox'][0],caption[0])>30):
+                        boundaries.append(entry['bbox'][3]+2)
+                for table in model.tables:
+                    if table.page==figure.page and table.bbox and table.bbox['y']+table.bbox['height']<box['y']:
+                        boundaries.append(table.bbox['y']+table.bbox['height']+2)
+                floor = max([caption[1]-600,0,*boundaries])
+                components = [tuple(info['bbox']) for info in page.get_image_info()]
+                components += [tuple(d['rect']) for d in page.get_drawings() if d['rect'].width>2 and d['rect'].height>2]
+                components = [b for b in components if b[0]>=left-3 and b[2]<=right+3
+                              and b[1]>=floor and b[3]<caption[1]-2 and b[2]-b[0]>2 and b[3]-b[1]>2]
+                if not components:
+                    continue
+                # Grow from the detected panel. Remote rules, page backgrounds
+                # and headers are not part of the graphic merely because they
+                # occur in the same column above its caption.
+                extent = (box['x'],box['y'],box['x']+box['width'],box['y']+box['height'])
+                connected = []
+                remaining = components.copy()
+                while remaining:
+                    added = []
+                    for part in remaining:
+                        x_overlap = min(extent[2],part[2])-max(extent[0],part[0])
+                        y_overlap = min(extent[3],part[3])-max(extent[1],part[1])
+                        if (x_overlap>=10 and y_overlap>=-35) or (y_overlap>=10 and x_overlap>=-18):
+                            added.append(part)
+                    if not added:
+                        break
+                    connected.extend(added)
+                    remaining = [part for part in remaining if part not in added]
+                    extent = (min(extent[0],*(p[0] for p in added)),min(extent[1],*(p[1] for p in added)),
+                              max(extent[2],*(p[2] for p in added)),max(extent[3],*(p[3] for p in added)))
+                components = connected
+                if not components:
+                    continue
+                x0,y0 = min(b[0] for b in components),min(b[1] for b in components)
+                x1,y1 = max(b[2] for b in components),max(b[3] for b in components)
+                for entry in page.get_text('blocks'):
+                    if (entry[0]>=left and entry[2]<=right and max(floor,y0-15)<=entry[1]
+                            and entry[3]<caption[1]-2 and len(clean_text(entry[4]))<160):
+                        x0,y0,x1,y1 = min(x0,entry[0]),min(y0,entry[1]),max(x1,entry[2]),max(y1,entry[3])
+                overlap = max(0,min(x1,box['x']+box['width'])-max(x0,box['x'])) * max(
+                    0,min(y1,box['y']+box['height'])-max(y0,box['y']))
+                area = box['width']*box['height']
+                if overlap < .85*area or (x1-x0)*(y1-y0) < 1.18*area:
+                    continue
+                expanded = dict(x=x0,y=y0,width=x1-x0,height=y1-y0)
+                omit = [tuple(entry[:4]) for entry in page.get_text('blocks')
+                        if entry is not caption and re.match(r'^Fig(?:ure)?\.?\s*\d+\s*[:.]',clean_text(entry[4]),re.I)
+                        and entry[1]<y1 and entry[3]>y0 and entry[0]<x1 and entry[2]>x0]
+                if any(min(x1,r[2])-max(x0,r[0])>.15*(x1-x0) for r in omit):
+                    continue
+                headers = [tuple(entry[:4]) for entry in page.get_text('blocks') if entry[3]<box['y']
+                           and entry[1]<page.rect.height*.08
+                           and re.search(r'IEEE|TRANSACTIONS|arXiv|doi\.org',entry[4])]
+                for header in headers:
+                    if header[1]<expanded['y']+expanded['height'] and header[3]>expanded['y']:
+                        bottom = expanded['y']+expanded['height']
+                        expanded['y'] = header[3]+3
+                        expanded['height'] = bottom-expanded['y']
+                asset = folder/'assets'/f'expanded_{figure.id}.png'
+                if not _crop(raster,figure.page,expanded,asset,omit=omit):
+                    continue
+                figure.bbox,figure.src,figure.source = expanded,f'/api/documents/{model.id}/assets/{asset.name}','pdf_original_crop'
+                changed += 1
+        finally:
+            raster.close()
+    return changed
+
+
+def repair_pdf_word_spacing(model: DocumentModel, pdf_path: Path, protected_block_ids: set[str] | None = None) -> int:
+    """Restore spaces and line hyphens only when every source character agrees."""
+    import pymupdf
+    from .normalizer import clean_text, _numbered_citations
+    protected = protected_block_ids or set()
+    changed = 0
+    compact = lambda value: re.sub(r"[\s-]+", "", clean_text(value))
+    with pymupdf.open(pdf_path) as pdf:
+        for section in model.sections:
+            for block in section.blocks:
+                if (block.type != 'paragraph' or not block.page or not block.bbox
+                        or block.id in protected or len(block.text) < 60
+                        or any(n.type not in {'text','citation'} or n.bold or n.italic for n in block.content)):
+                    continue
+                box = block.bbox
+                source = clean_text(pdf[block.page-1].get_text('text',clip=pymupdf.Rect(
+                    box['x']-1,box['y']-1,box['x']+box['width']+1,box['y']+box['height']+1)))
+                if source and source != block.text and compact(source) == compact(block.text):
+                    block.text = source
+                    block.content = _numbered_citations(source,model.references)
+                    changed += 1
     return changed
 
 

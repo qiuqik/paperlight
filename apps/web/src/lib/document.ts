@@ -7,9 +7,10 @@ export type Block = {
   items?: string[]; listContent?: InlineNode[][]; listOrdered?: boolean; number?: number; label?: string; caption?: string; src?: string;
   captionContent?: InlineNode[];
   beforeHeading?: boolean;
+  continuesPrevious?: boolean;
   headers?: Array<{text: string} | string>; rows?: Array<Array<{text: string} | string>>; tableRows?: TableRow[];
 };
-export type Section = {id: string; title: string; level: number; type?: string; presentation?: 'article' | 'prompt'; blocks: Block[]};
+export type Section = {id: string; title: string; level: number; type?: string; presentation?: 'article' | 'prompt'; tocHidden?: boolean; blocks: Block[]};
 export type Reference = {id: string; number: number; authors: string; title: string; venue?: string; year?: number; doi?: string; preview?: string};
 export type PageGeometry = {number: number; width: number; height: number};
 export type PublicationInfo = {publication_status: 'published' | 'accepted' | 'preprint' | 'unknown'; venue: string | null; venue_short?: string | null; publish_time: number | null; authors: string[]; institutions: string[]; keywords: string[]; publication_source_url: string | null; source_urls: string[]; checked_at: string};

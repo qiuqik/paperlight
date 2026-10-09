@@ -250,6 +250,14 @@ class ModelUpgradeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "overlap"):
             _append_missing_appendix(old, new)
 
+    def test_acknowledgments_do_not_hide_missing_appendix(self):
+        old = {"sections": [{"id": "ack", "title": "ACKNOWLEDGMENTS", "type": "appendix", "blocks": [
+            {"id": "ack-text", "type": "paragraph", "page": 10}]}]}
+        new = {"sections": [old["sections"][0],
+            {"id": "a", "title": "A Registry", "type": "appendix", "blocks": [
+                {"id": "a-text", "type": "paragraph", "page": 12}]}]}
+        self.assertEqual(_append_missing_appendix(old, new), ([], 1, 1))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,7 @@ import time
 import uuid
 import sqlite3
 from contextvars import ContextVar
+from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Lock
@@ -42,7 +43,13 @@ GROBID_URL = os.environ.get("GROBID_URL", "http://127.0.0.1:8070").rstrip("/")
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(80 * 1024 * 1024)))
 ALLOWED_ORIGINS = [value.strip() for value in os.environ.get("PAPERLIGHT_CORS_ORIGINS", "*").split(",") if value.strip()]
 
-app = FastAPI(title="Paperlight Document API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    _resume_documents()
+    yield
+
+
+app = FastAPI(title="Paperlight Document API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS or ["*"], allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"], allow_headers=["*"])
 jobs: dict[str, dict[str, Any]] = {}
 jobs_lock = Lock()
@@ -52,6 +59,7 @@ formula_lock = Lock()
 formula_data_lock = Lock()
 formula_active: set[str] = set()
 formula_executor = ThreadPoolExecutor(max_workers=1)
+parse_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pdf-parser")
 publication_executor = ThreadPoolExecutor(max_workers=2)
 publication_lock = Lock()
 publication_active: set[str] = set()
@@ -128,7 +136,7 @@ def initialize_accounts() -> None:
 @app.middleware("http")
 async def require_session(request: Request, call_next):
     path = request.url.path
-    if path == "/health" or path in {"/api/auth/login", "/api/auth/me", "/api/auth/logout"}:
+    if path == "/health" or path in {"/api/auth/login", "/api/auth/register", "/api/auth/me", "/api/auth/logout"}:
         return await call_next(request)
     if not (path.startswith("/api/") or path.startswith("/parser/")):
         return await call_next(request)
@@ -155,6 +163,29 @@ def login(credentials: dict[str, Any], response: Response, request: Request) -> 
                         max_age=30 * 24 * 60 * 60, path="/")
     return user
 
+
+@app.post("/api/auth/register", status_code=201)
+def register(credentials: dict[str, Any], response: Response, request: Request) -> dict[str, Any]:
+    username = credentials.get("username")
+    password = credentials.get("password")
+    confirmation = credentials.get("confirmPassword")
+    if not all(isinstance(value, str) for value in (username, password, confirmation)):
+        raise HTTPException(status_code=422, detail="请输入用户名、密码和确认密码。")
+    if password != confirmation:
+        raise HTTPException(status_code=422, detail="两次输入的密码不一致。")
+    try:
+        # Public registration never accepts a client-supplied role.
+        user = ACCOUNTS.create_user(username, password, role="user")
+    except ValueError as exc:
+        detail = ("用户名需为 3–40 个字母、数字、点、下划线或连字符。"
+                  if "Username" in str(exc) else "密码需为 4–1024 个字符。")
+        raise HTTPException(status_code=422, detail=detail) from exc
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="这个用户名已被使用，请换一个。") from exc
+    response.set_cookie(COOKIE_NAME, ACCOUNTS.create_session(user["id"]), httponly=True,
+                        secure=request.headers.get("x-forwarded-proto") == "https", samesite="lax",
+                        max_age=30 * 24 * 60 * 60, path="/")
+    return user
 
 @app.get("/api/auth/me")
 def me(request: Request) -> dict[str, Any]:
@@ -442,7 +473,7 @@ async def create_document(background_tasks: BackgroundTasks, file: UploadFile = 
         _set_job(document_id, documentId=document_id, status="processing", stage="queued", progress=0.02,
                  filename=filename, createdAt=time.time(), fingerprint=fingerprint, sourceKind="pdf_upload",
                  requestedParser=requested_parser)
-    background_tasks.add_task(_process_document, document_id, filename)
+    background_tasks.add_task(_queue_document, document_id, filename)
     return ProcessingStatus(documentId=document_id, status="processing", stage="queued", progress=0.02)
 
 
@@ -928,6 +959,22 @@ def revise_formula(document_id: str, block_id: str, changes: dict[str, Any]) -> 
     with import_lock:
         _save_result(document_id)
     return record
+
+
+def _queue_document(document_id: str, filename: str) -> None:
+    # PDFium is not thread safe; keep model inference and native PDF work on
+    # one worker without occupying the HTTP thread pool with waiting imports.
+    parse_executor.submit(_process_document, document_id, filename)
+
+
+def _resume_documents() -> None:
+    for user in ACCOUNTS.list_users():
+        for record in reversed(ACCOUNTS.list_documents(user["id"])):
+            if record["parse_status"] != "processing":
+                continue
+            state = _get_job(record["id"]) or {}
+            _set_job(record["id"], status="processing", stage="queued", progress=0.02)
+            _queue_document(record["id"], state.get("filename", record["original_filename"]))
 
 
 def _process_document(document_id: str, filename: str) -> None:

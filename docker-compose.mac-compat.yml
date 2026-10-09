@@ -1,0 +1,7 @@
+# Apple Silicon fallback: emulate the tested x86 parser when ARM dependencies fail.
+# The web image remains native; GROBID is already linux/amd64 in the base file.
+services:
+  parser:
+    platform: linux/amd64
+  mineru:
+    platform: linux/amd64

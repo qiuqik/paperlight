@@ -15,6 +15,65 @@ from backend.scripts.repair_list_geometry import repair as repair_list_geometry
 
 
 class GeometryTests(unittest.TestCase):
+    def test_appendix_example_keeps_result_figure_with_its_explanation(self):
+        first = Block(id="a", type="paragraph", text="Example 2 (Result). See Figure 14.")
+        second = Block(id="b", type="paragraph", text="Example 3 (Result). See Figure 15.")
+        f14 = Block(id="f14", type="figure", number=14)
+        f15 = Block(id="f15", type="figure", number=15)
+        model = DocumentModel(id="paper", metadata=Metadata(), sections=[Section(
+            id="gallery", title="Gallery", type="appendix", blocks=[first, second, f15, f14])])
+        result = finalize_document_model(model)
+        self.assertEqual([b.id for b in result.sections[0].blocks], ["a", "f14", "b", "f15"])
+        self.assertEqual(finalize_document_model(result).model_dump(), result.model_dump())
+
+    def test_same_page_sentence_crosses_large_floating_figure(self):
+        first = Block(id="first", type="paragraph", text="One is a student", page=1,
+                      bbox={"x": 72, "y": 176, "width": 468, "height": 40})
+        second = Block(id="second", type="paragraph", text="from the school.", page=1,
+                       bbox={"x": 72, "y": 533, "width": 468, "height": 40})
+        figure = Block(id="figure-1", type="figure", page=1,
+                       bbox={"x": 72, "y": 238, "width": 468, "height": 253})
+        model = DocumentModel(id="paper", metadata=Metadata(), pages=[{"number": 1, "height": 800}],
+                              sections=[Section(id="body", title="Body", blocks=[first, figure, second])])
+        result = finalize_document_model(model)
+        self.assertTrue(second.continuesPrevious)
+        self.assertEqual([b.id for b in result.sections[0].blocks], ["first", "second", "figure-1"])
+        self.assertTrue(finalize_document_model(result).sections[0].blocks[1].continuesPrevious)
+
+    def test_page_continuation_preserves_anchors_and_moves_floating_figure(self):
+        first = Block(id="first", type="paragraph", text="trained on a single", page=1,
+                      bbox={"x": 310, "y": 670, "width": 220, "height": 50})
+        second = Block(id="second", type="paragraph", text="image at a time.", page=2,
+                       bbox={"x": 50, "y": 70, "width": 220, "height": 50})
+        figure = Block(id="figure-1", type="figure", caption="Result", page=2)
+        model = DocumentModel(id="paper", metadata=Metadata(), pages=[
+            {"number": 1, "width": 600, "height": 800}, {"number": 2, "width": 600, "height": 800}],
+            sections=[Section(id="body", title="Body", blocks=[first, figure, second])], figures=[figure])
+        result = finalize_document_model(model)
+        self.assertEqual([b.id for b in result.sections[0].blocks], ["first", "second", "figure-1"])
+        self.assertTrue(second.continuesPrevious)
+        self.assertEqual(first.text, "trained on a single")
+        self.assertEqual(second.page, 2)
+        self.assertEqual(finalize_document_model(result).model_dump(), result.model_dump())
+
+    def test_continuation_does_not_cross_equation_or_completed_sentence(self):
+        for barrier in [Block(id="eq", type="equation", text="x=1"), None]:
+            first = Block(id="first", type="paragraph", text="A complete sentence." if barrier is None else "where",
+                          page=1, bbox={"x": 50, "y": 670, "width": 220, "height": 50})
+            second = Block(id="second", type="paragraph", text="another sentence starts.", page=2,
+                           bbox={"x": 50, "y": 70, "width": 220, "height": 50})
+            model = DocumentModel(id="paper", metadata=Metadata(), pages=[
+                {"number": 1, "height": 800}, {"number": 2, "height": 800}],
+                sections=[Section(id="body", title="Body", blocks=[first, *([barrier] if barrier else []), second])])
+            self.assertFalse(finalize_document_model(model).sections[0].blocks[-1].continuesPrevious)
+
+    def test_lettered_appendix_hierarchy_is_not_inverted(self):
+        model = DocumentModel(id="paper", metadata=Metadata(), sections=[
+            Section(id="a", title="A. Results", level=2, type="appendix"),
+            Section(id="a1", title="A.1. Details", level=1, type="appendix"),
+            Section(id="a11", title="A.1.1 Further details", type="appendix")])
+        self.assertEqual([s.level for s in finalize_document_model(model).sections], [1, 2, 3])
+
     def test_adjacent_title_lines_do_not_become_contents_sections(self) -> None:
         def entry(label: str, text: str, top: float, bottom: float):
             box = SimpleNamespace(l=90, r=530, t=top, b=bottom, coord_origin="BOTTOMLEFT")

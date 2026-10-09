@@ -11,6 +11,37 @@ from backend.app.vision import configured_provider
 
 
 class PdfRepairTests(unittest.TestCase):
+    def test_publisher_cover_is_not_the_title_or_an_introduction(self):
+        import pymupdf
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'cover.pdf'
+            title = 'Comparative Analysis of Cartographic Models'
+            abstract = ('We compare methods for cartographic knowledge and explain the results. ' * 6) + 'Key Words: maps, models.'
+            pdf = pymupdf.open()
+            cover = pdf.new_page()
+            cover.insert_text((50,50),'Journal Name')
+            cover.insert_text((50,100),'To cite this article: Authors')
+            cover.insert_text((50,130),'To link to this article: DOI')
+            page = pdf.new_page()
+            page.insert_text((50,60),title,fontsize=20)
+            page.insert_text((50,90),'Alice Lee, Bob Chen')
+            page.insert_textbox(pymupdf.Rect(50,120,550,240),abstract,fontsize=10)
+            pdf.save(path)
+            pdf.close()
+            summary = Block(id='summary',type='paragraph',page=2,text=abstract,
+                            bbox={'x':50,'y':120,'width':500,'height':120})
+            body = Block(id='body',type='paragraph',page=2,text='Introduction prose.',
+                         bbox={'x':50,'y':300,'width':500,'height':30})
+            model = DocumentModel(id='sample',metadata=Metadata(title='Journal Name'),sections=[
+                Section(id='cover',title='1 Introduction',blocks=[Block(id='cover-text',type='paragraph',text='Publisher',page=1)]),
+                Section(id='article',title=f'2 {title}',blocks=[summary,body])])
+            repair_pdf_frontmatter(model,path)
+            model = finalize_document_model(model)
+            self.assertEqual(model.metadata.title,title)
+            self.assertEqual(model.metadata.authors,['Alice Lee','Bob Chen'])
+            self.assertEqual([s.title for s in model.sections],['Abstract','1 Introduction'])
+            self.assertEqual(model.sections[0].blocks[0].id,'summary')
+
     def test_author_rosters_ignore_roles_and_institutions(self):
         self.assertEqual(_names('Juntong Chen, Graduate Student Member, IEEE, Qiaoyun Huang, and Chenhui Li'),
                          ['Juntong Chen', 'Qiaoyun Huang', 'Chenhui Li'])

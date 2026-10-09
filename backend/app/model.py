@@ -65,6 +65,7 @@ class Block(BaseModel):
     captionContent: list[InlineNode] = Field(default_factory=list)
     src: str | None = None
     beforeHeading: bool = False
+    continuesPrevious: bool = False
     headers: list[Any] = Field(default_factory=list)
     rows: list[list[Any]] = Field(default_factory=list)
     tableRows: list[TableRow] = Field(default_factory=list)
@@ -76,6 +77,7 @@ class Section(BaseModel):
     level: int = 1
     type: Literal["abstract", "body", "appendix"] = "body"
     presentation: Literal["article", "prompt"] = "article"
+    tocHidden: bool = False
     blocks: list[Block] = Field(default_factory=list)
 
 

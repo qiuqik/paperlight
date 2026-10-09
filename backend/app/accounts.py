@@ -95,17 +95,26 @@ class AccountStore:
         with self.connect() as db:
             return db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
 
-    def create_user(self, username: str, password: str, role: str = "user", display_name: str = "") -> dict[str, Any]:
+    def create_user(self, username: str, password: str, role: str = "user", display_name: str = "",
+                   *, initial_admin: bool = False) -> dict[str, Any]:
         username = username.strip()
         if not (3 <= len(username) <= 40) or not all(char.isalnum() or char in "._-" for char in username):
             raise ValueError("Username must be 3–40 letters, digits, dots, underscores, or hyphens.")
         if len(password) < 4 or len(password) > 1024:
             raise ValueError("Password must be 4–1024 characters.")
+        if initial_admin and role != "admin":
+            raise ValueError("Initial account must be an administrator.")
         if role not in {"admin", "user"}:
             raise ValueError("Invalid role.")
         identifier = uuid.uuid4().hex
         now = time.time()
         with self.connect() as db:
+            if initial_admin:
+                # Serialize competing bootstrap commands; ordinary registration
+                # may have created accounts before the owner initializes an admin.
+                db.execute("BEGIN IMMEDIATE")
+                if db.execute("SELECT 1 FROM users WHERE role='admin' LIMIT 1").fetchone():
+                    raise ValueError("An administrator already exists.")
             db.execute("INSERT INTO users(id,username,password_hash,role,display_name,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
                        (identifier, username, PASSWORDS.hash(password), role, display_name.strip() or username, now, now))
         return self.get_user(identifier)

@@ -1,0 +1,137 @@
+{
+  "measuredAt": "2026-10-09",
+  "units": {
+    "fileSize": "decimal GB",
+    "rss": "MiB"
+  },
+  "environment": {
+    "logicalCpus": 12,
+    "torch": "2.14.0+cpu",
+    "docling": "2.131.0",
+    "hostRamGiB": 31.96,
+    "host": "Windows",
+    "physicalCores": 6,
+    "torchvision": "0.29.0+cpu",
+    "rapidocr": "3.9.2",
+    "containerArchitecture": "linux/amd64",
+    "dockerRamGiB": 15.59,
+    "cpu": "Intel Core i7-8700K"
+  },
+  "scope": "parse_pdf direct call; cached models; sequential; excludes upload/database/cloud enrichment; RSS is cumulative process high-water mark",
+  "textPdfSamples": [
+    {
+      "pages": 11,
+      "wallSeconds": 38.39,
+      "timings": {
+        "referenceScanSeconds": 0.21,
+        "doclingSeconds": 31.22,
+        "grobidSeconds": 0.0,
+        "frontmatterCorrections": 1.0,
+        "mergedFigures": 0.0,
+        "attachedFigureCaptions": 0.0,
+        "recoveredFigures": 0.0,
+        "recoveredCompositeFigures": 0.0,
+        "expandedFigureCrops": 0.0,
+        "recoveredTableCaptions": 0.0,
+        "trimmedAbstractLabels": 0.0,
+        "repairedOverlappingParagraphs": 0.0,
+        "repairedWordSpacing": 0.0,
+        "inlineFormulaCrops": 0.0,
+        "normalizingSeconds": 2.73
+      },
+      "usedOcr": false,
+      "processPeakRssMiB": 2089.4
+    },
+    {
+      "pages": 23,
+      "wallSeconds": 79.28,
+      "timings": {
+        "referenceScanSeconds": 0.57,
+        "doclingSeconds": 61.45,
+        "grobidSeconds": 0.0,
+        "frontmatterCorrections": 1.0,
+        "mergedFigures": 0.0,
+        "attachedFigureCaptions": 0.0,
+        "recoveredFigures": 0.0,
+        "recoveredCompositeFigures": 0.0,
+        "expandedFigureCrops": 0.0,
+        "recoveredTableCaptions": 0.0,
+        "trimmedAbstractLabels": 0.0,
+        "repairedOverlappingParagraphs": 0.0,
+        "repairedWordSpacing": 0.0,
+        "inlineFormulaCrops": 0.0,
+        "normalizingSeconds": 17.26
+      },
+      "usedOcr": false,
+      "processPeakRssMiB": 3447.1
+    },
+    {
+      "pages": 45,
+      "wallSeconds": 73.23,
+      "timings": {
+        "referenceScanSeconds": 0.24,
+        "doclingSeconds": 66.07,
+        "grobidSeconds": 0.0,
+        "frontmatterCorrections": 1.0,
+        "mergedFigures": 0.0,
+        "attachedFigureCaptions": 0.0,
+        "recoveredFigures": 0.0,
+        "recoveredCompositeFigures": 0.0,
+        "expandedFigureCrops": 0.0,
+        "recoveredTableCaptions": 0.0,
+        "trimmedAbstractLabels": 0.0,
+        "repairedOverlappingParagraphs": 0.0,
+        "repairedWordSpacing": 0.0,
+        "inlineFormulaCrops": 0.0,
+        "normalizingSeconds": 6.92
+      },
+      "usedOcr": false,
+      "processPeakRssMiB": 4009.4
+    }
+  ],
+  "scanPdfSample": {
+    "pages": 1,
+    "kind": "rasterized-first-page",
+    "wallSeconds": 42.28,
+    "timings": {
+      "referenceScanSeconds": 0.0,
+      "doclingSeconds": 38.03,
+      "grobidSeconds": 0.0,
+      "frontmatterCorrections": 0.0,
+      "mergedFigures": 0.0,
+      "attachedFigureCaptions": 0.0,
+      "recoveredFigures": 0.0,
+      "recoveredCompositeFigures": 0.0,
+      "expandedFigureCrops": 0.0,
+      "recoveredTableCaptions": 0.0,
+      "trimmedAbstractLabels": 0.0,
+      "repairedOverlappingParagraphs": 0.0,
+      "repairedWordSpacing": 0.0,
+      "inlineFormulaCrops": 0.0,
+      "normalizingSeconds": 0.2
+    },
+    "usedOcr": true,
+    "processPeakRssMiB": 2540.2,
+    "characters": 2498
+  },
+  "historicalImports": {
+    "pages": 338,
+    "note": "Historical versions and import timing scope; sum is not batch wall-clock time",
+    "count": 20,
+    "totalSecondsSum": 1463.16,
+    "totalSecondsMax": 384.46,
+    "totalSecondsMin": 20.91,
+    "totalSecondsMedian": 35.015,
+    "doclingSecondsSum": 879.11
+  },
+  "bytes": {
+    "doclingHistoricalCache": 1871646147,
+    "twentyOriginalPdfs": 144699174,
+    "mineruImage": 3710311223,
+    "twentyDocumentDirectories": 278344187,
+    "webImage": 446994332,
+    "grobidImage": 1717306087,
+    "mineruCache": 853356187,
+    "parserImage": 3002217798
+  }
+}

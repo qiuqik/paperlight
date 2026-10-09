@@ -15,11 +15,12 @@ from typing import Any, Callable
 import httpx
 
 from .model import DocumentModel
-from .normalizer import extract_pdf_references, normalize_docling, parse_grobid
+from .normalizer import extract_pdf_references, normalize_docling, parse_grobid, finalize_document_model
 from .mineru_normalizer import normalize_mineru
 from .pdf_fidelity import (merge_split_pdf_figures, recover_composite_pdf_figures,
                            recover_missing_pdf_figures, recover_pdf_table_captions, repair_overlapping_pdf_paragraphs,
-                           trim_abstract_figure_labels, attach_pdf_figure_captions, recover_inline_pdf_formulas)
+                           trim_abstract_figure_labels, attach_pdf_figure_captions, recover_inline_pdf_formulas, repair_pdf_word_spacing,
+                           expand_pdf_figure_crops)
 from .pdf_frontmatter import repair_pdf_frontmatter
 
 
@@ -30,7 +31,7 @@ class PdfParseResult:
     used_ocr: bool
 
 
-def _needs_ocr(docling_doc: Any) -> bool:
+def _needs_ocr(docling_doc: Any, pdf_path: Path | None = None) -> bool:
     page_text: dict[int, int] = {}
     total_chars = 0
     for item, _depth in docling_doc.iterate_items():
@@ -42,7 +43,19 @@ def _needs_ocr(docling_doc: Any) -> bool:
             if page is not None:
                 page_text[page] = page_text.get(page, 0) + len(text)
     count = len(getattr(docling_doc, "pages", {}) or {})
-    return total_chars < 120 or bool(count and page_text and sum(page_text.get(page, 0) < 40 for page in range(1, count + 1)) / count >= .3)
+    if total_chars < 120:
+        return True
+    sparse = [page for page in range(1, count + 1) if page_text.get(page, 0) < 40]
+    if not count or not page_text or len(sparse) / count < .3:
+        return False
+    if pdf_path:
+        # Galleries and vector-only supplemental pages can contain no Docling
+        # body text while still having a perfectly usable PDF text layer.
+        # OCR of those pages turns diagram labels into spurious article prose.
+        import pymupdf
+        with pymupdf.open(pdf_path) as pdf:
+            return sum(len(pdf[number - 1].get_text().strip()) < 40 for number in sparse) / count >= .3
+    return True
 
 
 def _fetch_grobid(pdf_path: Path, filename: str, folder: Path, grobid_url: str) -> dict[str, Any]:
@@ -131,7 +144,7 @@ def _parse_docling(pdf_path: Path, document_id: str, filename: str, folder: Path
 
         document = convert(False)
         ocr_mode = os.environ.get("PAPERLIGHT_OCR_MODE", "auto").lower()
-        used_ocr = ocr_mode == "always" or (ocr_mode == "auto" and _needs_ocr(document))
+        used_ocr = ocr_mode == "always" or (ocr_mode == "auto" and _needs_ocr(document, pdf_path))
         if used_ocr:
             progress("recognizing_scanned_pages", .48)
             document = convert(True)
@@ -148,9 +161,11 @@ def _parse_docling(pdf_path: Path, document_id: str, filename: str, folder: Path
     timings["attachedFigureCaptions"] = float(attach_pdf_figure_captions(model, pdf_path))
     timings["recoveredFigures"] = float(recover_missing_pdf_figures(model, pdf_path, folder))
     timings["recoveredCompositeFigures"] = float(recover_composite_pdf_figures(model, pdf_path, folder))
+    timings["expandedFigureCrops"] = float(expand_pdf_figure_crops(model,pdf_path,folder))
     timings["recoveredTableCaptions"] = float(recover_pdf_table_captions(model, pdf_path))
     timings["trimmedAbstractLabels"] = float(trim_abstract_figure_labels(model, pdf_path))
     timings["repairedOverlappingParagraphs"] = float(repair_overlapping_pdf_paragraphs(model, pdf_path))
+    timings["repairedWordSpacing"] = float(repair_pdf_word_spacing(model, pdf_path))
     timings["inlineFormulaCrops"] = float(recover_inline_pdf_formulas(model, pdf_path, folder))
     model.figures.sort(key=lambda figure: (figure.number is None, figure.number or 0))
     for order, block in enumerate(block for section in model.sections for block in section.blocks):
@@ -160,4 +175,4 @@ def _parse_docling(pdf_path: Path, document_id: str, filename: str, folder: Path
     elif not grobid_data.get("references"):
         model.metadata.notice = "GROBID 未识别参考文献，引用关联可能不完整。"
     timings["normalizingSeconds"] = round(time.perf_counter() - normalizing, 2)
-    return PdfParseResult(model, timings, used_ocr)
+    return PdfParseResult(finalize_document_model(model, document_dir=folder), timings, used_ocr)

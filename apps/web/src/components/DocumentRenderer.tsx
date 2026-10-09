@@ -56,7 +56,7 @@ function PlainText({text, onReference}: {text: string; onReference: (id: string)
     const citation = part.match(/^\[(\d+)\]$/);
     if (citation) return <button className="inline-link" key={index} onClick={() => onReference(citation[1])}>{part}</button>;
     const figure = part.match(/^(?:Fig(?:ure)?\.?)\s*(\d+(?:\.\d+)*)$/i);
-    if (figure) return <button className="inline-link" key={index} onClick={() => document.getElementById(`figure-${figure[1].replaceAll('.', '-')}`)?.scrollIntoView({behavior: 'smooth'})}>{part}</button>;
+    if (figure) return <button className="inline-link" key={index} onClick={() => (document.getElementById(`figure-${figure[1].replaceAll('.', '-')}`) || document.querySelector(`[data-figure-number="${figure[1]}"]`))?.scrollIntoView({behavior: 'smooth'})}>{part}</button>;
     const table = part.match(/^Table\s*(\d+(?:\.\d+)*)$/i);
     if (table) return <button className="inline-link" key={index} onClick={() => document.getElementById(`table-${table[1].replaceAll('.', '-')}`)?.scrollIntoView({behavior: 'smooth'})}>{part}</button>;
     return <span key={index}>{part}</span>;
@@ -119,12 +119,13 @@ function EquationBlock({block, annotations, pages}: {block: Block; annotations: 
     <AreaMarks block={block} annotations={annotations} pages={pages} />
   </figure>;
 }
-function BlockView({block, annotations, pages, onReference, pdfUrl, prompt = false}: {block: Block; annotations: Annotation[]; pages: PageGeometry[]; onReference: (id: string) => void; pdfUrl?: string; prompt?: boolean}) {
+function BlockView({block, annotations, pages, onReference, pdfUrl, prompt = false, inlineParagraph = false}: {block: Block; annotations: Annotation[]; pages: PageGeometry[]; onReference: (id: string) => void; pdfUrl?: string; prompt?: boolean; inlineParagraph?: boolean}) {
   const common = {'data-block-id': block.id, 'data-page': block.page};
+  const Paragraph = inlineParagraph ? 'span' : 'p';
   const originalPage = pdfUrl ? `${pdfUrl}#page=${block.page || 1}` : undefined;
   switch (block.type) {
-    case 'paragraph': return <p {...common} className={`area-target${prompt && /^(?:[A-Z][A-Z\s()&-]{5,}|Step \d+\s*[—–-])/.test(block.text || '') ? ' prompt-label' : ''}`}>{block.content?.length ? <Inline nodes={block.content} onReference={onReference} /> : <PlainText text={block.text || ''} onReference={onReference} />}{block.source === 'pdf_original_paragraph' && originalPage && <a className="formula-original" href={originalPage} target="_blank" rel="noreferrer">查看原文</a>}<AreaMarks block={block} annotations={annotations} pages={pages} /></p>;
-    case 'figure': return <figure {...common} id={block.id} className="paper-figure area-target" onDragStart={event => event.preventDefault()}>{block.src && <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || block.label || '论文插图'} />}{block.source === 'arxiv_html_missing_visual' && <div className="source-notice">arXiv HTML 未提供这张图像。{block.sourceUrl && <a href={block.sourceUrl} target="_blank" rel="noreferrer">查看该版本的原 PDF</a>}</div>}<AreaMarks block={block} annotations={annotations} pages={pages} /><figcaption><strong>{block.label || `Figure ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption></figure>;
+    case 'paragraph': return <Paragraph {...common} className={`area-target${prompt && /^(?:[A-Z][A-Z\s()&-]{5,}|Step \d+\s*[—–-])/.test(block.text || '') ? ' prompt-label' : ''}`}>{block.content?.length ? <Inline nodes={block.content} onReference={onReference} /> : <PlainText text={block.text || ''} onReference={onReference} />}{block.source === 'pdf_original_paragraph' && originalPage && <a className="formula-original" href={originalPage} target="_blank" rel="noreferrer">查看原文</a>}<AreaMarks block={block} annotations={annotations} pages={pages} /></Paragraph>;
+    case 'figure': return <figure {...common} id={block.id} data-figure-number={block.label?.replace(/^Figure\s+/i, '') || block.number} className="paper-figure area-target" onDragStart={event => event.preventDefault()}>{block.src && <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || block.label || '论文插图'} />}{block.source === 'arxiv_html_missing_visual' && <div className="source-notice">arXiv HTML 未提供这张图像。{block.sourceUrl && <a href={block.sourceUrl} target="_blank" rel="noreferrer">查看该版本的原 PDF</a>}</div>}<AreaMarks block={block} annotations={annotations} pages={pages} /><figcaption><strong>{block.label || `Figure ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption></figure>;
     case 'table': return <figure {...common} id={block.id} className="paper-figure area-target scholarly-table-figure" onDragStart={event => event.preventDefault()}><figcaption><strong>{block.label || `Table ${block.number}`}</strong> {block.captionContent?.length ? <Inline nodes={block.captionContent} onReference={onReference} /> : <PlainText text={block.caption || ''} onReference={onReference} />}</figcaption>{block.src ? <AreaImage block={block} annotations={annotations} pages={pages} alt={block.caption || '论文表格'} /> : <TableGrid block={block} onReference={onReference} />}<AreaMarks block={block} annotations={annotations} pages={pages} /></figure>;
     case 'equation': return <EquationBlock block={block} annotations={annotations} pages={pages} />;
     case 'list': {const List = block.listOrdered ? 'ol' : 'ul'; return <div {...common} className="area-target"><List>{(block.items || []).map((item, index) => <li key={index}>{block.listContent?.[index]?.length ? <Inline nodes={block.listContent[index]} onReference={onReference} /> : item}</li>)}</List><AreaMarks block={block} annotations={annotations} pages={pages} /></div>;}
@@ -139,7 +140,18 @@ function BlockView({block, annotations, pages, onReference, pdfUrl, prompt = fal
 function SectionView({section, annotations, pages, onReference, pdfUrl, arxivHtml}: {section: Section; annotations: Annotation[]; pages: PageGeometry[]; onReference: (id: string) => void; pdfUrl?: string; arxivHtml: boolean}) {
   const Heading = section.level === 1 ? 'h2' : section.level === 2 ? 'h3' : 'h4';
   const prompt = section.presentation === 'prompt' && (!arxivHtml || /^(?:\d+(?:\.\d+)*\.?\s*)?Prompts?$/i.test(section.title.trim()));
-  return <section id={section.id} className={section.type === 'abstract' ? 'abstract-section' : prompt ? 'prompt-section' : ''}>{section.blocks.filter(block => block.beforeHeading).map(block => <BlockView key={block.id} block={block} annotations={annotations} pages={pages} onReference={onReference} pdfUrl={pdfUrl} prompt={prompt} />)}<Heading>{section.title}</Heading>{section.blocks.filter(block => !block.beforeHeading).map(block => <BlockView key={block.id} block={block} annotations={annotations} pages={pages} onReference={onReference} pdfUrl={pdfUrl} prompt={prompt} />)}</section>;
+  const renderBlocks = (blocks: Block[]) => {
+    const groups: Block[][] = [];
+    for (const block of blocks) {
+      const group = groups.at(-1);
+      if (!prompt && block.type === 'paragraph' && block.continuesPrevious && group?.at(-1)?.type === 'paragraph') group.push(block);
+      else groups.push([block]);
+    }
+    return groups.map(group => group.length === 1
+      ? <BlockView key={group[0].id} block={group[0]} annotations={annotations} pages={pages} onReference={onReference} pdfUrl={pdfUrl} prompt={prompt} />
+      : <p key={group[0].id} className="continued-paragraph">{group.map((block, index) => <span key={block.id}>{index > 0 && ' '}<BlockView block={block} annotations={annotations} pages={pages} onReference={onReference} pdfUrl={pdfUrl} inlineParagraph /></span>)}</p>);
+  };
+  return <section id={section.id} className={section.type === 'abstract' ? 'abstract-section' : prompt ? 'prompt-section' : ''}>{renderBlocks(section.blocks.filter(block => block.beforeHeading))}{(!section.tocHidden || prompt) && <Heading>{section.title}</Heading>}{renderBlocks(section.blocks.filter(block => !block.beforeHeading))}</section>;
 }
 
 export default function DocumentRenderer({document: paper, annotations, onReference}: {document: DocumentModel; annotations: Annotation[]; onReference: (id: string) => void}) {

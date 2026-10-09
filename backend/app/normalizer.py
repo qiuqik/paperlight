@@ -71,7 +71,7 @@ def _renumber_sections(sections: list[Section]) -> None:
     sub_number = 0
     detail_number = 0
     for section in sections:
-        if section.type in {"abstract", "appendix"}:
+        if section.type in {"abstract", "appendix"} or section.tocHidden:
             continue
         title = _heading_without_number(section.title)
         if title == title.upper() and re.search(r"[A-Z]", title):
@@ -572,6 +572,53 @@ def _heading_level(text: str) -> int:
     return 1
 
 
+def _mark_pdf_continuations(model: DocumentModel) -> None:
+    """Keep source anchors separate, but display broken PDF prose in one paragraph."""
+    heights = {int(page["number"]): page["height"] for page in model.pages}
+    for section in model.sections:
+        previous = None
+        visuals = []
+        for block in list(section.blocks):
+            block.continuesPrevious = False
+            if block.type == "figure" and previous:
+                visuals.append(block)
+                continue
+            if block.type != "paragraph" or not block.text or not block.bbox or not block.page:
+                previous, visuals = None, []
+                continue
+            if previous and previous.bbox and previous.page:
+                a, b = previous.bbox, block.bbox
+                incomplete = not re.search(r"[.!?:;][\]\"')\u201d]*$", previous.text.strip())
+                starts_lower = bool(re.match(r"^[a-z]", block.text))
+                overlap = max(0, min(a["x"] + a["width"], b["x"] + b["width"]) - max(a["x"], b["x"]))
+                same_column = overlap >= .6 * min(a["width"], b["width"])
+                height = heights.get(previous.page, 0)
+                column_turn = (previous.page == block.page and b["x"] > a["x"] + a["width"] - 5
+                               and height and a["y"] + a["height"] > .6 * height and b["y"] < .4 * height)
+                page_turn = (block.page == previous.page + 1 and height
+                             and a["y"] + a["height"] > .6 * height
+                             and b["y"] < .4 * heights.get(block.page, height))
+                nearby = previous.page == block.page and same_column and -5 <= b["y"] - a["y"] - a["height"] <= 45
+                gap_figures = [v for v in section.blocks if v.type == "figure" and v.page == block.page and v.bbox
+                               and v.bbox["y"] >= a["y"] + a["height"] - 5
+                               and v.bbox["y"] + v.bbox["height"] <= b["y"] + 5]
+                floating_gap = (previous.page == block.page and same_column and bool(gap_figures)
+                                and all(v.page == block.page and v.bbox
+                                        and v.bbox["y"] >= a["y"] + a["height"] - 5
+                                        and v.bbox["y"] + v.bbox["height"] <= b["y"] + 5
+                                        for v in gap_figures)
+                                and 0 <= b["y"] - a["y"] - a["height"]
+                                <= sum(v.bbox["height"] for v in gap_figures) + 120)
+                if incomplete and starts_lower and (nearby or floating_gap or column_turn or page_turn):
+                    block.continuesPrevious = True
+                    # A floating image must not interrupt a sentence at a page/column break.
+                    for visual in visuals:
+                        section.blocks.remove(visual)
+                    at = section.blocks.index(block) + 1
+                    section.blocks[at:at] = visuals
+            previous, visuals = block, []
+
+
 def _repair_heading(text: str) -> str:
     # PDF extraction often joins a section number and its title ("1Introduction").
     text = re.sub(r"^(\d+(?:\.\d+)*)(?=(?:[A-Z][a-z]|[A-Z]{3,}))", r"\1 ", text)
@@ -841,24 +888,14 @@ def _prompt_code_lines(block: Block, document_dir: Path | None) -> list[str]:
     if not pdf_path.is_file():
         return []
     try:
-        import pypdfium2 as pdfium
+        import pymupdf
     except ImportError:
         return []
-
-    pdf = pdfium.PdfDocument(str(pdf_path))
-    try:
-        page = pdf[block.page - 1]
-        text_page = page.get_textpage()
-        try:
-            height = page.get_size()[1]
-            box = block.bbox
-            text = text_page.get_text_bounded(
-                left=box["x"] - 1, bottom=height - box["y"] - box["height"] - 1,
-                right=box["x"] + box["width"] + 1, top=height - box["y"] + 1)
-        finally:
-            text_page.close()
-    finally:
-        pdf.close()
+    with pymupdf.open(pdf_path) as pdf:
+        box = block.bbox
+        text = pdf[block.page - 1].get_text("text", clip=pymupdf.Rect(
+            box["x"] - 1, box["y"] - 1,
+            box["x"] + box["width"] + 1, box["y"] + box["height"] + 1))
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return lines if (len(lines) >= 3 and len(lines[0]) < 120
                      and re.match(r"^(?:You are |Your task is |You will receive |Act as )", lines[1], re.I)) else []
@@ -978,18 +1015,49 @@ def finalize_document_model(model: DocumentModel, protected_block_ids: set[str] 
         pdf_path = document_dir / "original.pdf"
         if pdf_path.is_file():
             try:
-                import pypdfium2 as pdfium
-                pdf_document = pdfium.PdfDocument(str(pdf_path))
-                try:
+                import pymupdf
+                with pymupdf.open(pdf_path) as pdf_document:
                     for block in blocks.values():
-                        if block.type == "equation" and not block.text:
-                            block.text = _recover_pdf_formula(block, pdf_document)
-                finally:
-                    pdf_document.close()
+                        if block.type == "equation" and not block.text and block.page and block.bbox:
+                            box = block.bbox
+                            text = pdf_document[block.page - 1].get_text("text", clip=pymupdf.Rect(
+                                box["x"] - 2, box["y"] - 2,
+                                box["x"] + box["width"] + 2, box["y"] + box["height"] + 2))
+                            block.text = _formula_without_number(text, block.number)
             except (ImportError, OSError, ValueError):
                 pass
     _recover_inline_formulas(model, document_dir)
+    # Reflow appendix galleries around their explicit examples; PDF column
+    # geometry otherwise leaves numbered results far from the explaining text.
     for section in sections:
+        if section.type != "appendix":
+            continue
+        for figure in list(section.blocks):
+            if figure.type != "figure" or figure.number is None or figure.beforeHeading:
+                continue
+            matches = [(target, block) for target in sections if target.type == "appendix"
+                       for block in target.blocks if block.type == "paragraph"
+                       and re.search(rf"\b(?:Figure|Fig\.?)\s+{figure.number}(?!\d|\.\d)", block.text)
+                       and re.search(r"\bExample\s*\d+", block.text)]
+            if len(matches) == 1:
+                target, anchor = matches[0]
+                section.blocks.remove(figure)
+                target.blocks.insert(target.blocks.index(anchor) + 1, figure)
+    if model.source.startswith("docling") or model.source == "mineru_basic":
+        _mark_pdf_continuations(model)
+    for section in sections:
+        if (section.type == "appendix" and section.title.islower() and len(section.title)<24
+                and section.blocks and all(block.type == "figure" for block in section.blocks)):
+            section.tocHidden = True
+            section.level = 3
+        if re.fullmatch(r"\[[^\]]+\]", section.title.strip()):
+            section.presentation = "prompt"
+            section.tocHidden = True
+            section.level = 3
+        if section.type == "appendix":
+            marker = re.match(r"^[A-Z]((?:\.\d+)*)\.?\s+", section.title)
+            if marker:
+                section.level = min(1 + marker.group(1).count("."), 3)
         if _is_prompt_section(section):
             section.presentation = "prompt"
     for block in blocks.values():
@@ -1204,7 +1272,7 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             if len(candidates) >= 3 and all(re.fullmatch(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}", name) for name in candidates):
                 authors = candidates
                 continue
-        if label == "text" and location is not None and getattr(location, "bbox", None):
+        if label in {"text", "section_header"} and location is not None and getattr(location, "bbox", None):
             box = location.bbox
             center_x, center_y = (float(box.l) + float(box.r)) / 2, (float(box.b) + float(box.t)) / 2
             if any(left <= center_x <= right and bottom <= center_y <= top
@@ -1372,6 +1440,10 @@ def normalize_docling(docling_doc: Any, document_id: str, document_dir: Path, gr
             if sections and sections[-1].type == section_type and _heading_key(sections[-1].title) == _heading_key(heading):
                 sections.pop()
             level = _heading_level(heading)
+            if section_type == "appendix":
+                marker = re.match(r"^[A-Z]((?:\.\d+)*)\.?\s+", heading)
+                if marker:
+                    level = min(1 + marker.group(1).count("."), 3)
             if style_threshold is not None and level == 1 and section_type == "body" and location is not None and getattr(location, "bbox", None):
                 height = abs(float(location.bbox.t) - float(location.bbox.b))
                 if height < style_threshold:

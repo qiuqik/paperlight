@@ -1,17 +1,17 @@
 # Paperlight parser API
 
-The parser runs inside the root Docker Compose stack and is reached through the Next.js `/api/parser` proxy. New PDF imports use a private MinerU Basic CPU service and original-PDF geometry to produce a normalized `DocumentModel`. Docling and GROBID remain as an automatic fallback if MinerU fails. The arXiv-link import route is retired; saved arXiv documents remain readable. To run the parser directly without MinerU, set `PAPERLIGHT_PDF_PARSER=docling`.
+The parser runs inside the root Docker Compose stack and is reached through the Next.js `/api/parser` proxy. New PDF imports use Docling and original-PDF geometry to produce a normalized `DocumentModel`; GROBID assists reference recovery when needed. MinerU Basic CPU is an optional experimental service, disabled by default. Saved arXiv documents remain readable. See [deployment, Mac compatibility and resource measurements](../docs/deployment.md).
 
-## Start the full stack on Windows
+## Start the full stack with Docker (Windows, macOS, Linux)
 
-Install Docker Desktop with its WSL 2 backend. From the repository root:
+On Windows, install Docker Desktop with its WSL 2 backend. On macOS, install the Docker Desktop edition for your chip. On Linux, install Docker Engine and Compose. From the repository root:
 
 ```powershell
 docker compose up --build -d
 docker compose logs parser
 ```
 
-The Web app listens on `127.0.0.1:8040`. The parser, MinerU, and GROBID have no host ports; the Web app forwards same-origin requests to the parser inside Compose. Each user's source and parsed assets persist in `userdata/users/{user_id}/documents/{document_id}/`; account and annotation records persist in `userdata/paperlight.db`. No parsed source cache is shared between accounts. MinerU models persist in `backend/storage/mineru`; Docling models persist in a Docker volume for fallback. The parser image installs CPU-only PyTorch and torchvision, and Compose uses GROBID's smaller CPU/CRF image.
+The Web app listens on `127.0.0.1:8040`. The parser, MinerU, and GROBID have no host ports; the Web app forwards same-origin requests to the parser inside Compose. Each user's source and parsed assets persist in `userdata/users/{user_id}/documents/{document_id}/`; account and annotation records persist in `userdata/paperlight.db`. No parsed source cache is shared between accounts. MinerU models persist in `backend/storage/mineru`; Docling models persist in the `docling-model-cache` Docker volume. The parser image installs CPU-only PyTorch and torchvision, and Compose uses GROBID's smaller CPU/CRF image.
 
 For local frontend development only, `backend/docker-compose.yml` can start the parser separately on `127.0.0.1:8000`. Stop the root Compose services before using it, then run these commands from the `backend` directory:
 
@@ -61,7 +61,7 @@ Use a different installed Python version in the first command if needed. Docling
 - `PATCH /api/documents/{id}/formulas/{block_id}` — JSON `{"revised":"..."}` saves a human TeX correction while preserving the original image and model output.
 - `GET /health` — parser availability and GROBID endpoint.
 
-Source HTML or PDF, normalized JSON, raw `mineru.json` for a successful MinerU parse (or `docling.json` after fallback), extracted assets, and formula provenance are stored in the owner's private document folder with Docker Compose. Set `PAPERLIGHT_DATA_DIR` to move storage for a direct Python run. Set `PAPERLIGHT_PDF_PARSER=docling` to use the legacy parser deliberately. Set `GROBID_URL` if GROBID listens somewhere other than `http://127.0.0.1:8070`. `PAPERLIGHT_CORS_ORIGINS` accepts comma-separated frontend origins; a direct Python run without this setting allows all origins for local development. Uploaded PDFs are limited to 80 MB by default (`MAX_UPLOAD_BYTES`).
+Source HTML or PDF, normalized JSON, raw `mineru.json` for a successful MinerU parse (or `docling.json` after fallback), extracted assets, and formula provenance are stored in the owner's private document folder with Docker Compose. Set `PAPERLIGHT_DATA_DIR` to move storage for a direct Python run. The default is `PAPERLIGHT_PDF_PARSER=docling`; selecting `mineru` also requires starting its optional Compose profile. Set `GROBID_URL` if GROBID listens somewhere other than `http://127.0.0.1:8070`. `PAPERLIGHT_CORS_ORIGINS` accepts comma-separated frontend origins; a direct Python run without this setting allows all origins for local development. Uploaded PDFs are limited to 80 MB by default (`MAX_UPLOAD_BYTES`).
 
 Optional server-only `PAPERLIGHT_DEEPSEEK_API_KEY` enables image transcription with DeepSeek's image-capable `deepseek-flash` model. If absent, `PAPERLIGHT_DOUBAO_API_KEY` and an image-capable `PAPERLIGHT_DOUBAO_VISION_MODEL` enable the Doubao provider. The parser service also reads the untracked `backend/.env`; its `DEEPSEEK_APIKEY`, `Doubao_APIKEY`, and `Doubao_Model_id` names are supported. Keys never reach the browser. Parsing crops at most eight high-confidence inline expressions per PDF where source glyph positions and paragraph text agree. Vision output is saved separately from the original crop and can be previewed as LaTeX in the reader; the crop remains the default reading view. Up to 12 display formula crops are also transcribed. Requests use a two-call concurrency limit and up to three retries, and failures never block reading. Ambiguous inline symbols remain extracted text with an original-PDF link. alphaXiv MCP is reserved for a later assistant service and is not a body-content source.
 

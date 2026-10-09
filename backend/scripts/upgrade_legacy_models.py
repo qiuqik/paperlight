@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -473,9 +474,12 @@ def _add_anchored_equations(old: dict, new: dict) -> tuple[list[str], int, dict[
 
 def _append_missing_appendix(old: dict, new: dict) -> tuple[list[str], int, int]:
     """Append a disjoint appendix that the legacy References cutoff lost."""
-    if any(section.get("type") == "appendix" for section in old.get("sections", [])):
+    if any(section.get("type") == "appendix" and not
+           re.match(r"^acknowledg(?:e)?ments?\b", section.get("title", ""), re.I)
+           for section in old.get("sections", [])):
         return [], 0, 0
-    sections = [section for section in new.get("sections", []) if section.get("type") == "appendix"]
+    sections = [section for section in new.get("sections", []) if section.get("type") == "appendix"
+                and not re.match(r"^acknowledg(?:e)?ments?\b", section.get("title", ""), re.I)]
     if not sections:
         return [], 0, 0
     blocks = [block for section in sections for block in section.get("blocks", [])]
@@ -510,7 +514,8 @@ def upgrade(folder: Path, backup_root: Path | None, geometry_only: bool = False,
     path = folder / "document.json"
     old = json.loads(path.read_text(encoding="utf-8"))
     old_blocks = _blocks(old)
-    if old.get("modelVersion") == DOCUMENT_MODEL_VERSION and all(block.get("bbox") for block in old_blocks.values()):
+    if (not add_equations and not append_missing_appendix and old.get("modelVersion") == DOCUMENT_MODEL_VERSION
+            and all(block.get("bbox") for block in old_blocks.values())):
         return {"id": folder.name[:8], "status": "current"}
     if not (folder / "original.pdf").is_file() or not (folder / "docling.json").is_file():
         raise ValueError("Missing original PDF or Docling snapshot")
