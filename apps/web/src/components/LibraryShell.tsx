@@ -1,6 +1,7 @@
 'use client';
 import Link from 'next/link';
 import {useRouter} from 'next/navigation';
+import {mergeLocalReadingProgress} from '@/lib/readingProgress';
 import {readWorkspaceCache, writeWorkspaceCache} from '@/lib/workspaceCache';
 
 import {useCallback, useEffect, useRef, useState} from 'react';
@@ -13,7 +14,7 @@ import type {Account} from './AppShell';
 import type {PublicationInfo} from '@/lib/document';
 
 const formatReadingTime = (seconds: number) => seconds < 60 ? Math.floor(seconds) + ' 秒' : seconds < 3600 ? Math.floor(seconds / 60) + ' 分钟' : Math.floor(seconds / 3600) + ' 小时 ' + Math.floor(seconds % 3600 / 60) + ' 分钟';
-type Paper = {documentId: string; title: string; authors: string[]; pageCount: number; status: string; parseSource?: string; arxivId?: string; arxivVersion?: number; createdAt: number; lastOpenedAt?: number; annotationCount: number; readingSeconds?: number; progress: number; favorite: boolean; previewSrc?: string; publication?: PublicationInfo; tags?: PaperTags};
+type Paper = {documentId: string; title: string; authors: string[]; pageCount: number; status: string; parseSource?: string; arxivId?: string; arxivVersion?: number; createdAt: number; lastOpenedAt?: number; annotationCount: number; readingSeconds?: number; progress: number; progressUpdatedAt?: number; favorite: boolean; previewSrc?: string; publication?: PublicationInfo; tags?: PaperTags};
 type Section = 'all' | 'recent' | 'favorites';
 type UploadState = {documentId: string; status: string; stage?: string; progress?: number; error?: string};
 const stages: Record<string, string> = {queued: '等待解析', loading_parser: '准备解析器', fetching_arxiv_html: '获取 arXiv 官方 HTML', fetching_arxiv_pdf: '获取固定版本 PDF', extracting_structure: '提取正文', recognizing_scanned_pages: '识别扫描页', linking_references: '整理参考文献', normalizing_document: '整理图表和公式'};
@@ -22,7 +23,7 @@ const dateLabel = (timestamp?: number) => timestamp ? new Date(timestamp * 1000)
 export default function LibraryShell({user, onLogout}: {user: Account; onLogout: () => Promise<void>}) {
   const router = useRouter();
   const cacheKey = `papers:${user.id}`;
-  const [papers, setPapers] = useState<Paper[]>(() => readWorkspaceCache<Paper[]>(cacheKey) || []);
+  const [papers, setPapers] = useState<Paper[]>(() => mergeLocalReadingProgress(readWorkspaceCache<Paper[]>(cacheKey) || [], user.id));
   const [section, setSection] = useState<Section>('all');
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(() => !readWorkspaceCache<Paper[]>(cacheKey));
@@ -37,8 +38,8 @@ export default function LibraryShell({user, onLogout}: {user: Account; onLogout:
   const refresh = useCallback(async () => {
     const response = await fetch('/api/parser/api/documents', {cache: 'no-store'});
     if (!response.ok) throw new Error('无法读取我的论文');
-    setPapers(await response.json() as Paper[]);
-  }, []);
+    setPapers(mergeLocalReadingProgress(await response.json() as Paper[], user.id));
+  }, [user.id]);
   useEffect(() => {void refresh().catch(error => setMessage(error.message)).finally(() => setLoading(false));}, [refresh]);
 
 

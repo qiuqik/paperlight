@@ -1,4 +1,15 @@
 type Position = {percent: number; blockId?: string; blockOffset: number; recordedAt: number};
+export function mergeLocalReadingProgress<T extends {documentId: string; progress: number; progressUpdatedAt?: number}>(records: T[], userId: string): T[] {
+  return records.map(record => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('paperlight:position:' + userId + ':' + record.documentId) || 'null') as Position | null;
+      if (saved && Number.isFinite(saved.percent) && saved.percent >= 0 && saved.percent <= 100 && Number.isFinite(saved.recordedAt) && saved.recordedAt > (record.progressUpdatedAt || 0) * 1000) {
+        return {...record, progress: saved.percent, progressUpdatedAt: saved.recordedAt / 1000};
+      }
+    } catch {}
+    return record;
+  });
+}
 export function trackReadingPosition(root: HTMLElement, userId: string, documentId: string, onProgress: (value: number) => void, onError: () => void) {
   const key = 'paperlight:position:' + userId + ':' + documentId;
   const url = '/api/parser/api/documents/' + documentId + '/progress';
@@ -23,7 +34,14 @@ export function trackReadingPosition(root: HTMLElement, userId: string, document
     if (block) {const b = block.getBoundingClientRect(); root.scrollTop += b.top + b.height * position.blockOffset - root.getBoundingClientRect().top - 24;}
     else root.scrollTop = Math.max(0, root.scrollHeight - root.clientHeight) * position.percent / 100;
     root.style.scrollBehavior = behavior;
-    onProgress(Math.round(capture().percent));
+    const percent = capture().percent;
+    if (Math.abs(percent - position.percent) >= 0.001) {
+      position = {...position, percent, recordedAt: Date.now()};
+      pending = position;
+      try {localStorage.setItem(key, JSON.stringify(position));} catch {}
+      clearTimeout(timer); timer = setTimeout(() => flush(), 400);
+    }
+    onProgress(Math.round(percent));
     correcting = false;
   };
   const write = async (value: Position) => {
@@ -37,7 +55,7 @@ export function trackReadingPosition(root: HTMLElement, userId: string, document
     if (leaving) void write(value); else chain = chain.then(() => write(value));
   };
   const scroll = () => {
-    if (!restored || correcting) return;
+    if (!restored || correcting || !root.isConnected || root.clientHeight <= 0) return;
     const next = capture();
     if (position && next.blockId === position.blockId && Math.abs(next.blockOffset-position.blockOffset) < 0.00001 && Math.abs(next.percent-position.percent) < 0.001) return;
     position = next; pending = next;

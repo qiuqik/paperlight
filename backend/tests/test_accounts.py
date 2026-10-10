@@ -278,6 +278,8 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(self.alice_client.post("/api/activity", json=tick).status_code, 204)
         paper = self.alice_client.get("/api/documents").json()[0]
         self.assertEqual(paper["readingSeconds"], 30)
+        self.assertEqual(paper["progress"], 75)
+        self.assertAlmostEqual(paper["progressUpdatedAt"], now / 1000)
         self.assertEqual(main.ACCOUNTS.list_documents(self.bob["id"]), [])
 
     def test_settings_progress_and_account_management(self) -> None:

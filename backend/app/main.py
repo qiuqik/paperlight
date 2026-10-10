@@ -529,6 +529,7 @@ def list_documents(request: Request) -> list[dict[str, Any]]:
             publication_path = folder / "publication.json"
             publication_state = json.loads(publication_path.read_text(encoding="utf-8")) if publication_path.is_file() else {}
             publication = publication_state.get("information") if publication_state.get("status") == "ready" else None
+            reading_progress = ACCOUNTS.progress(owner_id, item["id"]) or {}
             records.append({"tags": read_tags(folder), "publication": publication, "previewSrc": preview_src, "documentId": item["id"], "fingerprint": item["fingerprint"],
                             "title": item["title"], "status": status.get("status", item["parse_status"]),
                             "parseSource": status.get("parseSource", ""), "arxivId": status.get("arxivId", ""),
@@ -536,7 +537,8 @@ def list_documents(request: Request) -> list[dict[str, Any]]:
                             "createdAt": item["created_at"], "lastOpenedAt": item["last_opened_at"],
                             "readingSeconds": item.get("reading_seconds", 0), "pageCount": item["page_count"], "annotationCount": len(ACCOUNTS.annotations(item["id"])),
                             "authors": json.loads(item["authors"]), "favorite": bool(item["favorite"]),
-                            "progress": (ACCOUNTS.progress(owner_id, item["id"]) or {}).get("scroll_progress", 0)})
+                            "progress": reading_progress.get("scroll_progress", 0),
+                            "progressUpdatedAt": reading_progress.get("updated_at", 0)})
         except (OSError, ValueError, TypeError):
             continue
     return sorted(records, key=lambda item: item["createdAt"], reverse=True)
