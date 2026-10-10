@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -42,6 +43,14 @@ def translation_targets(model: dict[str, Any]) -> dict[str, str]:
                     groups.append([block])
             for group in groups:
                 first = group[0]
+                if first.get('type') in {'figure', 'table'}:
+                    nodes = first.get('captionContent') or []
+                    caption = ''.join(node.get('display') or node.get('text') or node.get('latex') or '' for node in nodes) if nodes else first.get('caption', '')
+                    if caption.strip():
+                        kind = 'Figure' if first['type'] == 'figure' else 'Table'
+                        label = first.get('label') or (f"{kind} {first['number']}" if first.get('number') is not None else '')
+                        add('block:' + first['id'], f'{label} {caption}')
+                    continue
                 if first.get('type') not in {'paragraph', 'heading', 'quote', 'footnote', 'requirement', 'list'}:
                     continue
                 texts = []
@@ -97,9 +106,15 @@ def translate_text(text: str) -> str:
 
 
 class TranslationStore:
-    def __init__(self) -> None:
+    def __init__(self, max_workers: int | None = None) -> None:
+        if max_workers is None:
+            try:
+                max_workers = int(os.environ.get('PAPERLIGHT_TRANSLATION_WORKERS', '6'))
+            except ValueError:
+                max_workers = 6
+        self.workers = min(16, max(1, max_workers))
         self.lock = RLock()
-        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='paragraph-translation')
+        self.executor = ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix='paragraph-translation')
         self.active: set[tuple[str, str, str]] = set()
 
     def _read(self, folder: Path, targets: dict[str, str]) -> dict:

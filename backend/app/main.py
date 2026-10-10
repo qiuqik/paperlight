@@ -269,11 +269,14 @@ def put_reading_progress(document_id: str, progress: dict[str, Any]) -> dict[str
     _document_record(document_id)
     percent, offset = progress.get("percent"), progress.get("blockOffset", 0)
     block_id = progress.get("blockId")
-    if not isinstance(percent, (int, float)) or not 0 <= percent <= 100 or not isinstance(offset, (int, float)) or not 0 <= offset <= 1:
+    if not isinstance(percent, (int, float)) or not 0 <= percent <= 100 or not isinstance(offset, (int, float)) or not -100 <= offset <= 1:
         raise HTTPException(status_code=422, detail="Invalid reading progress.")
     if block_id is not None and (not isinstance(block_id, str) or len(block_id) > 200):
         raise HTTPException(status_code=422, detail="Invalid block ID.")
-    ACCOUNTS.save_progress(_user()["id"], document_id, float(percent), block_id, float(offset))
+    recorded_at = progress.get("recordedAt")
+    if recorded_at is not None and (isinstance(recorded_at, bool) or not isinstance(recorded_at, (int, float)) or not 0 < recorded_at <= (time.time() + 300) * 1000):
+        raise HTTPException(status_code=422, detail="Invalid progress timestamp.")
+    ACCOUNTS.save_progress(_user()["id"], document_id, float(percent), block_id, float(offset), recorded_at / 1000 if recorded_at is not None else None)
     return {"percent": percent, "blockId": block_id, "blockOffset": offset}
 
 
@@ -415,7 +418,9 @@ def _annotation_block_ids(document_id: str) -> set[str]:
             continue
         for part in (anchor, anchor.get("start"), anchor.get("end")):
             if isinstance(part, dict) and isinstance(part.get("blockId"), str):
-                protected.add(part["blockId"])
+                block_id = part['blockId']
+                if not block_id.startswith('translation:'):
+                    protected.add(block_id)
     return protected
 
 
@@ -529,7 +534,7 @@ def list_documents(request: Request) -> list[dict[str, Any]]:
                             "parseSource": status.get("parseSource", ""), "arxivId": status.get("arxivId", ""),
                             "arxivVersion": status.get("arxivVersion"),
                             "createdAt": item["created_at"], "lastOpenedAt": item["last_opened_at"],
-                            "pageCount": item["page_count"], "annotationCount": len(ACCOUNTS.annotations(item["id"])),
+                            "readingSeconds": item.get("reading_seconds", 0), "pageCount": item["page_count"], "annotationCount": len(ACCOUNTS.annotations(item["id"])),
                             "authors": json.loads(item["authors"]), "favorite": bool(item["favorite"]),
                             "progress": (ACCOUNTS.progress(owner_id, item["id"]) or {}).get("scroll_progress", 0)})
         except (OSError, ValueError, TypeError):
@@ -670,10 +675,26 @@ def _create_v2_annotation(folder: Path, document_id: str, annotation: dict[str, 
         start, end = anchor.get("start"), anchor.get("end")
         if not isinstance(start, dict) or not isinstance(end, dict):
             raise HTTPException(status_code=422, detail="Invalid text anchor.")
+        translated = [isinstance(point.get('blockId'), str) and point['blockId'].startswith('translation:') for point in (start, end)]
+        if any(translated):
+            if not all(translated):
+                raise HTTPException(status_code=422, detail='Please select source text or translation text separately.')
+            _, targets = _translation_document(document_id)
+            cached = TRANSLATIONS.read(folder, targets)['items']
+            blocks = {'translation:' + key: {'text': item['text']} for key, item in cached.items() if item['status'] == 'ready'}
         if start.get("blockId") not in blocks or end.get("blockId") not in blocks:
             raise HTTPException(status_code=422, detail="Selected block does not exist.")
         if not all(isinstance(point.get("offset"), int) and point["offset"] >= 0 for point in (start, end)):
             raise HTTPException(status_code=422, detail="Invalid text offsets.")
+        if any(translated):
+            for point in (start, end):
+                length = len(blocks[point['blockId']]['text'].encode('utf-16-le')) // 2
+                if isinstance(point['offset'], bool) or point['offset'] > length:
+                    raise HTTPException(status_code=422, detail='Invalid translation offsets.')
+            if start['blockId'] == end['blockId'] and end['offset'] <= start['offset']:
+                raise HTTPException(status_code=422, detail='Invalid translation selection.')
+            if 'pdfRects' in anchor:
+                raise HTTPException(status_code=422, detail='Translation annotations do not map to original PDF rectangles.')
         quote = anchor.get("quote")
         if not isinstance(quote, str) or not quote.strip() or len(quote) > 10000:
             raise HTTPException(status_code=422, detail="Invalid text quote.")

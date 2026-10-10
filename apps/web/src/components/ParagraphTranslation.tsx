@@ -22,7 +22,7 @@ export function ParagraphTranslation({targetId}: {targetId: string}) {
       <Icon size={14} className={pending ? styles.spinning : undefined} /><span>{label}</span>
     </button></div>
     {item?.status === 'failed' && <div className={styles.error} role="status">{item.error}</div>}
-    {ready && <div id={translatedId} className={styles.text} lang="zh-CN" hidden={!item.expanded}>{item.text}</div>}
+    {ready && <div id={translatedId} className={styles.text} data-block-id={`translation:${targetId}`} data-translation-block lang="zh-CN" hidden={!item.expanded}>{item.text}</div>}
   </div>;
 }
 
@@ -30,7 +30,7 @@ export function TranslationToolbar({controller}: {controller: TranslationControl
   const {state, busy} = controller;
   return <div className={styles.toolbar}>
     {!state?.bulkRequested ? <button type="button" disabled={!state || !state.total || busy || !controller.enabled}
-      title="用 DeepSeek 翻译全部标题和文本段落" aria-label="一键翻译" onClick={() => void controller.translateAll()}>
+      title="用 DeepSeek 翻译全部标题、文本段落和图表说明" aria-label="一键翻译" onClick={() => void controller.translateAll()}>
       <Languages size={17} /><span>一键翻译</span>
     </button> : <>
       <button type="button" title="全部展开译文" aria-label="全部展开译文" disabled={busy} onClick={() => void controller.setExpanded(true)}><ChevronDown size={16} /><span>全部展开</span></button>

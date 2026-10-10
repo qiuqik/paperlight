@@ -44,3 +44,20 @@
 .original-paragraph{margin:0 0 1.2em}.original-paragraph img{display:block;width:100%;height:auto}.original-paragraph figcaption{font:11px Arial,sans-serif;color:var(--muted)}.original-paragraph figcaption a{margin-left:8px;color:var(--accent)}.original-paragraph details{margin-top:5px}.original-paragraph summary{cursor:pointer}
 .paper-content .scholarly-table-figure figcaption{margin:0 0 16px;color:var(--text);font-size:.78em;line-height:1.55}.paper-content .scholarly-table-scroll{max-width:100%;overflow-x:auto;padding-bottom:5px}.paper-content .scholarly-table{width:max-content;min-width:100%;border-collapse:collapse;border-top:3px double var(--text);border-bottom:3px double var(--text);font:0.82em/1.4 var(--reader-font);color:var(--text)}.paper-content .scholarly-table th,.paper-content .scholarly-table td{padding:7px 9px;border:0;vertical-align:middle;white-space:nowrap}.paper-content .scholarly-table th:first-child{max-width:19em;white-space:normal}.paper-content .scholarly-table .align-center{text-align:center}.paper-content .scholarly-table .align-right{text-align:right}.paper-content .scholarly-table .align-left{text-align:left}.paper-content .scholarly-table .top-single{border-top:1px solid var(--text)}.paper-content .scholarly-table .top-double{border-top:3px double var(--text)}.paper-content .scholarly-table .bottom-single{border-bottom:1px solid var(--text)}.paper-content .scholarly-table .bottom-double{border-bottom:3px double var(--text)}.paper-content .scholarly-table .katex{font-size:1em}.paper-content .paper-equation .katex{font-size:1.03em}
 @media(max-width:760px){.admin-content{grid-template-columns:1fr}.reader-topbar .library-link{font-size:12px}.top-actions>button[aria-label="退出登录"]{font-size:0}.top-actions>button[aria-label="退出登录"]:after{content:"退出";font-size:12px}}
+
+/* Focus mode leaves the document and a standalone annotation palette visible. */
+.focus-mode{position:relative;background:var(--paper-bg)}
+.focus-mode .left-panel,.focus-mode .right-panel,.focus-mode .side-rail,.focus-mode .reader-topbar,.focus-mode .docked-tools{display:none!important}
+.focus-mode .reader-grid,.focus-mode .reading-column,.focus-mode .reader-scroll{background:var(--paper-bg)}
+.focus-mode .reading-progress{display:none}
+.focus-mode .paper-content{width:min(100%,calc(var(--reader-width) + 280px));padding-top:92px;min-height:100%}
+.focus-note-tools{position:absolute;top:16px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:6px;padding:5px;border:1px solid var(--border);border-radius:13px;background:var(--paper-bg);box-shadow:0 5px 24px #0002;z-index:9}
+.focus-note-tools .annotation-tools{border:0;background:transparent;padding:0}
+.focus-exit,.focus-note-heading button{display:flex;align-items:center;justify-content:center;width:32px;height:32px;border:0;border-radius:7px;background:transparent;color:var(--muted)}
+.focus-exit{border-left:1px solid var(--border);border-radius:0 7px 7px 0}
+.focus-exit:hover,.focus-note-heading button:hover{background:var(--app-bg);color:var(--accent)}
+.focus-note-editor{position:absolute;top:72px;left:50%;transform:translateX(-50%);width:min(360px,calc(100% - 32px));padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--paper-bg);box-shadow:0 10px 36px #0002;z-index:8}
+.focus-note-heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-size:13px}
+.focus-note-editor textarea{display:block;width:100%;min-height:100px;max-height:35dvh;resize:vertical;padding:10px;border:1px solid var(--border);border-radius:8px;color:var(--text);background:var(--paper-bg);font:14px/1.6 Arial,sans-serif}
+@media(max-width:760px){.focus-note-tools{top:10px}.focus-mode .paper-content{padding-top:78px}.focus-note-editor{top:64px}}
+.reader-scroll { overflow-anchor: none; }

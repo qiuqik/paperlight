@@ -15,6 +15,21 @@ function originalRangeText(range: Range): string {
   contents.querySelectorAll('[data-translation-ui]').forEach(element => element.remove());
   return contents.textContent || '';
 }
+function translatedBlock(blockId: string): boolean {return blockId.startsWith('translation:');}
+function rangesWithin(root: HTMLElement, range: Range, translated: boolean): Range[] {
+  return Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]'))
+    .filter(block => translatedBlock(block.dataset.blockId || '') === translated && range.intersectsNode(block))
+    .map(block => {
+      const part = document.createRange();
+      part.selectNodeContents(block);
+      if (block.contains(range.startContainer)) part.setStart(range.startContainer, range.startOffset);
+      if (block.contains(range.endContainer)) part.setEnd(range.endContainer, range.endOffset);
+      return part;
+    });
+}
+function selectedText(root: HTMLElement, range: Range, translated: boolean): string {
+  return translated ? rangesWithin(root, range, true).map(part => part.toString()).join('') : originalRangeText(range);
+}
 function textOffset(block: HTMLElement, node: Node, offset: number): number {
   const range = document.createRange();
   range.selectNodeContents(block);
@@ -29,7 +44,9 @@ export function captureAnchor(root: HTMLElement): TextAnchor | null {
   const startBlock = blockFor(range.startContainer, root);
   const endBlock = blockFor(range.endContainer, root);
   if (!startBlock || !endBlock) return null;
-  const quote = originalRangeText(range).trim();
+  const translated = translatedBlock(startBlock.dataset.blockId || '');
+  if (translated !== translatedBlock(endBlock.dataset.blockId || '')) return null;
+  const quote = selectedText(root, range, translated).trim();
   if (!quote) return null;
   const start = textOffset(startBlock, range.startContainer, range.startOffset);
   const end = textOffset(endBlock, range.endContainer, range.endOffset);
@@ -62,18 +79,20 @@ function rangeAt(startBlock: HTMLElement, startOffset: number, endBlock: HTMLEle
   return range;
 }
 
-function sameQuote(range: Range, quote: string): boolean {
-  return normalizeQuote(originalRangeText(range)) === normalizeQuote(quote);
+function sameQuote(root: HTMLElement, range: Range, quote: string, translated: boolean): boolean {
+  return normalizeQuote(selectedText(root, range, translated)) === normalizeQuote(quote);
 }
 
 export function resolveAnchor(root: HTMLElement, anchor: TextAnchor): Range | null {
   const startBlock = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.dataset.blockId === anchor.start.blockId);
   const endBlock = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.dataset.blockId === anchor.end.blockId);
   if (!startBlock || !endBlock) return null;
+  const translated = translatedBlock(anchor.start.blockId);
+  if (translated !== translatedBlock(anchor.end.blockId)) return null;
   const startText = startBlock.textContent || '';
   const endText = endBlock.textContent || '';
   const original = rangeAt(startBlock, anchor.start.offset, endBlock, anchor.end.offset);
-  if (original && (!anchor.quote || sameQuote(original, anchor.quote))
+  if (original && (!anchor.quote || sameQuote(root, original, anchor.quote, translated))
     && contextAt(startText, anchor.start.offset, anchor.prefix, 'before')
     && contextAt(endText, anchor.end.offset, anchor.suffix, 'after')) return original;
   if (!anchor.quote) return null;
@@ -82,7 +101,7 @@ export function resolveAnchor(root: HTMLElement, anchor: TextAnchor): Range | nu
     const match = findQuoteOffsets(startText, anchor.quote, anchor.prefix, anchor.suffix);
     if (match) {
       const recovered = rangeAt(startBlock, match.start, endBlock, match.end);
-      if (recovered && sameQuote(recovered, anchor.quote)) return recovered;
+      if (recovered && sameQuote(root, recovered, anchor.quote, translated)) return recovered;
     }
   }
 
@@ -91,7 +110,7 @@ export function resolveAnchor(root: HTMLElement, anchor: TextAnchor): Range | nu
   const recovered: Range[] = [];
   for (const start of starts) for (const end of ends) {
     const range = rangeAt(startBlock, start, endBlock, end);
-    if (range && sameQuote(range, anchor.quote)) recovered.push(range);
+    if (range && sameQuote(root, range, anchor.quote, translated)) recovered.push(range);
   }
   return recovered.length === 1 ? recovered[0] : null;
 }
@@ -109,15 +128,7 @@ export function renderTextHighlights(root: HTMLElement, annotations: Annotation[
     if (!range) continue;
     const key = `paperlight-${annotation.id.replace(/[^a-zA-Z0-9-]/g, '')}`;
     const color = /^#[0-9a-fA-F]{6}$/.test(annotation.color) ? annotation.color : '#f8d86a';
-    const sourceRanges = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]'))
-      .filter(block => range.intersectsNode(block))
-      .map(block => {
-        const part = document.createRange();
-        part.selectNodeContents(block);
-        if (block.contains(range.startContainer)) part.setStart(range.startContainer, range.startOffset);
-        if (block.contains(range.endContainer)) part.setEnd(range.endContainer, range.endOffset);
-        return part;
-      });
+    const sourceRanges = rangesWithin(root, range, translatedBlock(annotation.anchor.start.blockId));
     registry.set(key, new HighlightClass(...sourceRanges));
     style.textContent += (annotation.style || annotation.type) === 'underline'
       ? `::highlight(${key}){text-decoration:underline;text-decoration-color:${color};text-decoration-thickness:2px;background:transparent}`

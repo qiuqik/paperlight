@@ -263,6 +263,23 @@ class AccountApiTests(unittest.TestCase):
         self.assertTrue((main.RESULT_DIR / "users" / self.alice["id"] / doc / "formula-recognitions.json").is_file())
         self.assertFalse((main.RESULT_DIR / doc).exists())
 
+    def test_latest_progress_wins_and_per_document_reading_time(self) -> None:
+        import time
+        from datetime import date
+        doc = self.document_id
+        url = f"/api/documents/{doc}/progress"
+        now = time.time() * 1000
+        self.assertEqual(self.alice_client.put(url, json={"percent": 75, "blockId": "p2", "blockOffset": .333, "recordedAt": now}).status_code, 200)
+        self.assertEqual(self.alice_client.put(url, json={"percent": 20, "recordedAt": now - 1000}).status_code, 200)
+        self.assertEqual(self.alice_client.get(url).json()["scroll_progress"], 75)
+        self.assertEqual(self.alice_client.put(url, json={"percent": 0, "recordedAt": True}).status_code, 422)
+        tick = {"eventId": "11111111-1111-1111-1111-111111111111", "documentId": doc, "day": date.today().isoformat(), "seconds": 30}
+        self.assertEqual(self.alice_client.post("/api/activity", json=tick).status_code, 204)
+        self.assertEqual(self.alice_client.post("/api/activity", json=tick).status_code, 204)
+        paper = self.alice_client.get("/api/documents").json()[0]
+        self.assertEqual(paper["readingSeconds"], 30)
+        self.assertEqual(main.ACCOUNTS.list_documents(self.bob["id"]), [])
+
     def test_settings_progress_and_account_management(self) -> None:
         doc = self.document_id
         self.assertEqual(self.alice_client.put("/api/settings", json={"theme": "warm", "fontSize": 19}).status_code, 200)

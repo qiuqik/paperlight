@@ -4,7 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from unittest.mock import patch, Mock
 
 from fastapi.testclient import TestClient
@@ -44,10 +44,32 @@ class TranslationTests(unittest.TestCase):
     def test_continuations_and_titles_match_rendered_units(self):
         self.assertEqual(self.targets['block:p1'], 'This sentence continues here.')
         self.assertNotIn('block:p2', self.targets)
-        self.assertNotIn('block:f1', self.targets)
+        self.assertEqual(self.targets['block:f1'], 'A figure')
         self.assertEqual(self.targets['section:s1'], 'Introduction')
         self.assertEqual(self.targets['title'], 'A paper')
         self.assertEqual(self.targets['block:h1'], 'Details')
+
+    def test_figure_and_table_captions_are_translatable_but_visuals_are_not(self):
+        model = {'metadata': {}, 'sections': [{'id': 'captions', 'title': '', 'blocks': [
+            {'id': 'fig', 'type': 'figure', 'number': 1, 'caption': 'The framework.', 'text': 'Unrelated OCR from image'},
+            {'id': 'table', 'type': 'table', 'label': 'Table 2', 'caption': 'Stale caption',
+             'captionContent': [{'text': 'Evaluation '}, {'display': '[3]'}, {'text': ' results.'}], 'items': ['Unrelated cells']},
+            {'id': 'empty', 'type': 'figure', 'number': 3, 'caption': '  ', 'src': '/image.png'},
+            {'id': 'equation', 'type': 'equation', 'text': 'Untranslated formula'}]}]}
+        targets = translation_targets(model)
+        self.assertEqual(targets, {'block:fig': 'Figure 1 The framework.', 'block:table': 'Table 2 Evaluation [3] results.'})
+
+    def test_bulk_adds_new_captions_without_retranslating_saved_paragraphs(self):
+        original = {key: value for key, value in self.targets.items() if key != 'block:f1'}
+        with patch('backend.app.translations.translate_text', return_value='译文') as provider:
+            self.store.request(self.folder, original, None)
+            self.wait()
+            provider.reset_mock()
+            self.store.request(self.folder, self.targets, None)
+            result = self.wait()
+            provider.assert_called_once_with('A figure')
+            self.assertEqual(result['ready'], len(self.targets))
+            self.assertEqual(result['items']['block:f1']['text'], '译文')
 
     def test_bulk_cache_survives_new_store_and_no_repeat_calls(self):
         with patch('backend.app.translations.translate_text', side_effect=lambda text: '译文 '+text) as provider:
@@ -70,6 +92,39 @@ class TranslationTests(unittest.TestCase):
             finally:
                 restored.executor.shutdown(wait=True)
         self.assertEqual(json.loads((self.folder/'document.json').read_text()), MODEL)
+
+    def test_workers_overlap_and_do_not_exceed_configured_limit(self):
+        self.store.executor.shutdown(wait=True)
+        self.store = TranslationStore(max_workers=3)
+        entered, release, counter_lock = Event(), Event(), Lock()
+        active = peak = calls = 0
+        def provider(text):
+            nonlocal active, peak, calls
+            with counter_lock:
+                active += 1; calls += 1; peak = max(peak, active)
+                if active == 3: entered.set()
+            release.wait(5)
+            with counter_lock: active -= 1
+            return '译文 ' + text
+        with patch('backend.app.translations.translate_text', side_effect=provider):
+            try:
+                self.store.request(self.folder, self.targets, None)
+                self.assertTrue(entered.wait(3), 'Three requests must run concurrently')
+                self.assertEqual(calls, 3)
+            finally:
+                release.set()
+            result = self.wait()
+        self.assertEqual(peak, 3)
+        self.assertEqual(result['ready'], len(self.targets))
+        for key, source in self.targets.items():
+            self.assertEqual(result['items'][key]['text'], '译文 ' + source)
+
+    def test_worker_environment_defaults_and_limits(self):
+        for value, expected in [('6', 6), ('3', 3), ('0', 1), ('100', 16), ('invalid', 6)]:
+            with patch.dict('os.environ', {'PAPERLIGHT_TRANSLATION_WORKERS': value}):
+                store = TranslationStore()
+                try: self.assertEqual(store.workers, expected)
+                finally: store.executor.shutdown(wait=True)
 
     def test_inflight_dedup_and_collapse_before_result(self):
         entered, release = Event(), Event()
@@ -173,6 +228,58 @@ class TranslationApiTests(unittest.TestCase):
                 while self.alice.get(self.url).json()['processing'] and time.monotonic() < until:
                     time.sleep(.01)
                 self.assertIn('Normalized visible paragraph.', provider.call_args.args[0])
+
+    def seed_translation(self):
+        with patch('backend.app.main.publication_api_key', return_value='test'), patch('backend.app.translations.translate_text', return_value='中文译文😀适合做笔记。'):
+            self.alice.post(self.url, json={'all': True})
+            until = time.monotonic()+5
+            while self.alice.get(self.url).json()['processing'] and time.monotonic() < until:
+                time.sleep(.01)
+        return {'type': 'note', 'style': 'underline', 'noteEnabled': True, 'color': '#ef7474', 'note': '中文笔记',
+                'anchor': {'start': {'blockId': 'translation:block:p1', 'offset': 0},
+                           'end': {'blockId': 'translation:block:p1', 'offset': 4},
+                           'quote': '中文译文', 'prefix': '', 'suffix': '😀适合做笔记。'}}
+
+    def test_translation_notes_persist_and_remain_valid_after_collapse(self):
+        note = self.seed_translation()
+        url = f'/api/documents/{self.id}/annotations'
+        response = self.alice.post(url, json=note)
+        self.assertEqual(response.status_code, 201, response.text)
+        identifier = response.json()['id']
+        self.assertEqual(response.json()['anchor'], note['anchor'])
+        self.assertEqual(response.json()['style'], 'underline')
+        self.alice.patch(self.url, json={'expanded': False})
+        self.assertEqual(self.alice.get(url).json()[0]['note'], '中文笔记')
+        self.assertEqual(self.alice.patch(url+'/'+identifier, json={'note': '更新笔记'}).status_code, 200)
+        self.assertEqual(self.alice.get(url).json()[0]['note'], '更新笔记')
+        state = self.alice.get(self.url).json()
+        self.assertEqual(state['items']['block:p1']['text'], '中文译文😀适合做笔记。')
+        self.assertEqual(self.bob.post(url, json=note).status_code, 404)
+        self.assertEqual(self.alice.delete(url+'/'+identifier).status_code, 204)
+
+    def test_translation_note_validation_excludes_missing_mixed_and_pdf_anchors(self):
+        note = self.seed_translation()
+        url = f'/api/documents/{self.id}/annotations'
+        for identifier in ['translation:block:missing', 'translation:../secret', 'p1']:
+            changed = json.loads(json.dumps(note))
+            changed['anchor']['end']['blockId'] = identifier
+            self.assertEqual(self.alice.post(url, json=changed).status_code, 422)
+        for offset in [1000, True]:
+            changed = json.loads(json.dumps(note)); changed['anchor']['end']['offset'] = offset
+            self.assertEqual(self.alice.post(url, json=changed).status_code, 422)
+        changed = json.loads(json.dumps(note)); changed['anchor']['pdfRects'] = []
+        self.assertEqual(self.alice.post(url, json=changed).status_code, 422)
+
+    def test_cross_translation_and_title_caption_annotations(self):
+        note = self.seed_translation()
+        url = f'/api/documents/{self.id}/annotations'
+        for identifier in ['translation:title', 'translation:block:f1', 'translation:section:s1']:
+            changed = json.loads(json.dumps(note))
+            changed['anchor']['start']['blockId'] = identifier
+            changed['anchor']['end']['blockId'] = identifier
+            self.assertEqual(self.alice.post(url, json=changed).status_code, 201)
+        note['anchor']['end']['blockId'] = 'translation:block:p3'
+        self.assertEqual(self.alice.post(url, json=note).status_code, 201)
 
     def test_body_and_missing_key_validation(self):
         for body in ({}, {'all': True, 'targetId': 'block:p1'}):

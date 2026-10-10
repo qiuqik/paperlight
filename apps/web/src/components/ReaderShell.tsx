@@ -1,8 +1,9 @@
 'use client';
 import Link from 'next/link';
-import {useCallback, useEffect, useLayoutEffect, useRef, useState} from 'react';
+import {useCallback, useEffect, useRef, useState} from 'react';
 import {ArrowLeft, FileText, BookOpen, ChevronLeft, ChevronRight, Clock3, Highlighter, Image, List, Maximize2, Minus, Plus, Scan, Settings2, StickyNote, Table2, Underline, X} from 'lucide-react';
 import DocumentRenderer from './DocumentRenderer';
+import FocusModeTools from './FocusModeTools';
 import {TranslationToolbar} from './ParagraphTranslation';
 import {useDocumentTranslations} from '@/lib/useDocumentTranslations';
 import PdfPane from './PdfPane';
@@ -14,6 +15,7 @@ import demo from '@/data/demo.json';
 import type {Annotation, AreaAnchor, DocumentModel, Reference} from '@/lib/document';
 import {allBlocks, isTextAnchor, resolveAssetSources} from '@/lib/document';
 import {captureAnchor, renderTextHighlights, resolveAnchor} from '@/lib/anchors';
+import {useReadingProgress} from '@/lib/useReadingProgress';
 import {useReadingActivity} from '@/lib/useReadingActivity';
 import {useAnnotationUI, useLayout, usePreferences, type MarkStyle, type RightPanel} from '@/lib/stores';
 
@@ -69,16 +71,17 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
   const articleRef = useRef<HTMLElement>(null);
   const pdfRef = useRef<HTMLDivElement>(null);
   const [splitView, setSplitView] = useState(false);
+  const [focusNoteId, setFocusNoteId] = useState<string | null>(null);
   const [splitWidth, setSplitWidth] = useState<number | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
 
-  const readingAnchorRef = useRef<{blockId: string; blockOffset: number} | null>(null);
   const areaStart = useRef<{block: HTMLElement; surface: HTMLElement; x: number; y: number} | null>(null);
   const noteSyncTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const pendingCreates = useRef(new Map<string, Promise<void>>());
   const serverNoteWrites = useRef(new Map<string, Promise<void>>());
   const prefs = usePreferences();
   const layout = useLayout();
+  const showPdf = splitView && !!serverId && !layout.focus;
   const setLayout = useLayout(state => state.set);
   const annotationUI = useAnnotationUI();
   const figuresInOrder = [...paper.figures].sort((first, second) => (first.order ?? Infinity) - (second.order ?? Infinity));
@@ -131,91 +134,10 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
   useEffect(() => {
     if (!articleRef.current) return;
     return renderTextHighlights(articleRef.current, annotations);
-  }, [paper, annotations]);
-  useEffect(() => {
-    const root = articleRef.current;
-    if (!root || !serverId) return;
-    let cancelled = false;
-    let restored = false;
-    let frame = 0;
-    let lastStored = '';
-    let writeTimer: ReturnType<typeof setTimeout> | undefined;
-    let pending: {percent: number; blockId?: string; blockOffset: number} | undefined;
-    const flush = () => {
-      if (!pending) return;
-      const value = pending;
-      pending = undefined;
-      void fetch(`/api/parser/api/documents/${serverId}/progress`, {method: 'PUT', headers: {'content-type': 'application/json'}, body: JSON.stringify(value)})
-        .then(response => {if (!response.ok) setImportStatus('阅读进度未能同步到服务器');})
-        .catch(() => setImportStatus('阅读进度未能同步到服务器'));
-    };
-    const restore = async () => {
-      let saved: number | undefined;
-      let savedBlockId: string | undefined;
-      let savedBlockOffset = 0;
-      try {
-        const response = await fetch(`/api/parser/api/documents/${serverId}/progress`, {cache: 'no-store'});
-        if (response.ok) {
-          const entry = await response.json() as {scroll_progress?: number; block_id?: string; block_offset?: number};
-          saved = entry.scroll_progress;
-          savedBlockId = entry.block_id;
-          savedBlockOffset = entry.block_offset || 0;
-        }
-      } catch {}
-      if (cancelled) return;
-      saved = Number.isFinite(saved) ? Math.max(0, Math.min(100, saved!)) : 0;
-      frame = requestAnimationFrame(() => {
-        const block = savedBlockId && Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.dataset.blockId === savedBlockId);
-        if (block) {
-          const fraction = Number.isFinite(savedBlockOffset) ? Math.max(0, Math.min(1, savedBlockOffset)) : 0;
-          root.scrollTop += block.getBoundingClientRect().top + block.getBoundingClientRect().height * fraction - root.getBoundingClientRect().top - 24;
-          readingAnchorRef.current = {blockId: savedBlockId!, blockOffset: fraction};
-        } else {
-          root.scrollTop = (root.scrollHeight - root.clientHeight) * saved / 100;
-          const top = root.getBoundingClientRect().top + 24;
-          const visible = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.getBoundingClientRect().bottom > top);
-          const bounds = visible?.getBoundingClientRect();
-          readingAnchorRef.current = visible?.dataset.blockId ? {blockId: visible.dataset.blockId, blockOffset: bounds?.height ? Math.max(0, Math.min(1, (top - bounds.top) / bounds.height)) : 0} : null;
-        }
-        const height = root.scrollHeight - root.clientHeight;
-        const actual = height > 0 ? Math.round(root.scrollTop / height * 100) : 0;
-        setProgress(actual);
-        lastStored = `${actual}:${savedBlockId || ''}:${Math.round(savedBlockOffset * 20)}`;
-        restored = true;
-      });
-    };
-    const onScroll = () => {
-      if (!restored) return;
-      const height = root.scrollHeight - root.clientHeight;
-      const next = height > 0 ? Math.round(root.scrollTop / height * 100) : 0;
-      setProgress(next);
-      const top = root.getBoundingClientRect().top + 24;
-      const block = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.getBoundingClientRect().bottom > top);
-      const blockId = block?.dataset.blockId;
-      const bounds = block?.getBoundingClientRect();
-      const blockOffset = bounds?.height ? Math.max(0, Math.min(1, (top - bounds.top) / bounds.height)) : 0;
-      readingAnchorRef.current = blockId ? {blockId, blockOffset} : null;
-      const marker = `${next}:${blockId || ''}:${Math.round(blockOffset * 20)}`;
-      if (marker === lastStored) return;
-      lastStored = marker;
-      pending = {percent: next, blockId, blockOffset};
-      if (writeTimer) clearTimeout(writeTimer);
-      writeTimer = setTimeout(flush, 400);
-    };
-    root.addEventListener('scroll', onScroll, {passive: true});
-    void restore();
-    return () => {cancelled = true; cancelAnimationFrame(frame); if (writeTimer) clearTimeout(writeTimer); flush(); root.removeEventListener('scroll', onScroll);};
-  }, [serverId]);
-
-  useLayoutEffect(() => {
-    const root = articleRef.current;
-    const anchor = readingAnchorRef.current;
-    if (!root || !anchor) return;
-    const block = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]')).find(element => element.dataset.blockId === anchor.blockId);
-    if (!block) return;
-    const bounds = block.getBoundingClientRect();
-    root.scrollTop += bounds.top + bounds.height * anchor.blockOffset - root.getBoundingClientRect().top - 24;
-  }, [paper, prefs.fontFamily, prefs.fontSize, prefs.lineHeight, prefs.contentWidth, layout.focus, layout.leftOpen, layout.rightOpen]);
+  }, [paper, annotations, translations.state?.revision]);
+  useReadingProgress(articleRef, user.id, serverId, settingsReady && !!(translations.state || translations.error),
+    [paper, prefs.fontFamily, prefs.fontSize, prefs.lineHeight, prefs.contentWidth, layout.focus, layout.leftOpen, layout.rightOpen, showPdf, splitWidth, translations.state?.revision],
+    setProgress, () => setImportStatus('阅读进度未能同步到服务器'));
 
   useEffect(() => {
     if (!serverId) return;
@@ -251,7 +173,6 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
       const anchor = {start: {blockId: item.blockId || '', offset: item.start || 0}, end: {blockId: item.blockId || '', offset: item.end || 0}, quote: item.quote || '', prefix: '', suffix: ''};
       return {...item, documentId: id, type: item.note ? 'note' : item.mode === 'underline' ? 'underline' : 'highlight', anchor} as Annotation;
     });
-    readingAnchorRef.current = null;
     setProgress(0); setPaper(resolveAssetSources(document, id)); setLocalId(id); setServerId(id);
     setViewingOwner(ownerId && ownerId !== user.id ? ownerUsername || '其他用户' : '');
     setAnnotations(saved); setLayout({historyOpen: false});
@@ -275,7 +196,10 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
   const addAnnotation = useCallback(async (record: Annotation) => {
     if (!serverId) return;
     setAnnotations(current => [...current, record]);
-    if (record.type === 'note' || record.noteEnabled) {setLayout({rightPanel: 'notes', rightOpen: true}); setNoteFocusId(record.id);}
+    if (record.type === 'note' || record.noteEnabled) {
+      if (layout.focus) setFocusNoteId(record.id);
+      else {setLayout({rightPanel: 'notes', rightOpen: true}); setNoteFocusId(record.id);}
+    }
     const pending = (async () => {
       try {
         const response = await fetch(`/api/parser/api/documents/${serverId}/annotations`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(record)});
@@ -287,7 +211,7 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
     })();
     pendingCreates.current.set(record.id, pending);
     try {await pending;} finally {pendingCreates.current.delete(record.id);}
-  }, [serverId, setLayout]);
+  }, [serverId, setLayout, layout.focus]);
 
   const syncNote = (annotationId: string, note: string, remote: string) => {
     const writes = serverNoteWrites.current;
@@ -408,7 +332,7 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
       setImportStatus('');
     } catch (error) {setImportStatus(error instanceof Error ? error.message : '打开服务器文件失败');}
   };
-  const jumpToAnnotation = (record: Annotation) => {
+  const jumpToAnnotation = async (record: Annotation) => {
     const root = articleRef.current;
     if (!root) return;
     if (!isTextAnchor(record.anchor) && record.anchor.pdfOnly) {
@@ -418,6 +342,12 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
       return;
     }
     if (isTextAnchor(record.anchor)) {
+      const translationIds = [record.anchor.start.blockId, record.anchor.end.blockId]
+        .filter(id => id.startsWith('translation:')).map(id => id.slice('translation:'.length));
+      for (const targetId of new Set(translationIds)) {
+        if (!translations.state?.items[targetId]?.expanded) await translations.setExpanded(true, targetId);
+      }
+      if (translationIds.length) await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       const range = resolveAnchor(root, record.anchor);
       range?.startContainer.parentElement?.scrollIntoView({behavior: 'smooth', block: 'center'});
     } else root.querySelector(`[data-block-id="${record.anchor.blockId}"]`)?.scrollIntoView({behavior: 'smooth', block: 'center'});
@@ -447,13 +377,22 @@ export default function ReaderShell({initialId, user, onLogout}: {initialId?: st
 
   return <div className={`reader-app theme-${prefs.theme} dock-${prefs.toolbarDock} ${layout.focus ? 'focus-mode' : ''} ${annotationUI.markStyle === 'area' ? 'area-mode' : ''}`} style={{'--reader-font': prefs.fontFamily, '--reader-size': `${prefs.fontSize}px`, '--reader-leading': prefs.lineHeight, '--reader-width': `${prefs.contentWidth}px`,
       '--split-width': splitWidth === null ? 'var(--reader-width)' : `${splitWidth}%`, '--custom-app': prefs.customApp, '--custom-paper': prefs.customPaper, '--custom-text': prefs.customText, '--custom-accent': prefs.customAccent} as React.CSSProperties}>
-    <header className="reader-topbar"><Link className="brand reader-brand" href="/"><BookOpen size={20} /><strong>Paperlight</strong></Link><Link className="library-link" href="/" aria-label="返回论文库" title="返回论文库"><ArrowLeft size={19} /></Link>{viewingOwner && <span className="owner-context">正在查看 {viewingOwner} 的论文</span>}<span className="top-title" title={paper.metadata.title}>{paper.metadata.title}</span>{prefs.toolbarDock === 'top' && toolbar}<div className="top-actions"><TranslationToolbar controller={translations} /><span className="read-time"><Clock3 size={15} /> {paper.metadata.readMinutes || '—'} min</span><button title="显示 PDF" aria-label="显示 PDF" aria-pressed={splitView} disabled={!serverId} onClick={() => setSplitView(value => !value)}><FileText size={18} /></button><button title="减小字号" aria-label="减小字号" onClick={() => prefs.set({fontSize: Math.max(14, prefs.fontSize - 1)})}><Minus size={16} /></button><button title="增大字号" aria-label="增大字号" onClick={() => prefs.set({fontSize: Math.min(26, prefs.fontSize + 1)})}><Plus size={16} /></button><button title="阅读设置" aria-label="阅读设置" onClick={() => layout.set({settingsOpen: true})}><Settings2 size={17} /></button><button title="专注模式" aria-label="专注模式" aria-pressed={layout.focus} onClick={() => layout.set({focus: !layout.focus, leftOpen: layout.focus, rightOpen: layout.focus})}><Maximize2 size={18} /></button><AccountMenu user={user} onLogout={onLogout} /></div></header>
+    {!layout.focus && <header className="reader-topbar"><Link className="brand reader-brand" href="/"><BookOpen size={20} /><strong>Paperlight</strong></Link><Link className="library-link" href="/" aria-label="返回论文库" title="返回论文库"><ArrowLeft size={19} /></Link>{viewingOwner && <span className="owner-context">正在查看 {viewingOwner} 的论文</span>}<span className="top-title" title={paper.metadata.title}>{paper.metadata.title}</span>{prefs.toolbarDock === 'top' && toolbar}<div className="top-actions"><TranslationToolbar controller={translations} /><span className="read-time"><Clock3 size={15} /> {paper.metadata.readMinutes || '—'} min</span><button title="显示 PDF" aria-label="显示 PDF" aria-pressed={splitView} disabled={!serverId} onClick={() => setSplitView(value => !value)}><FileText size={18} /></button><button title="减小字号" aria-label="减小字号" onClick={() => prefs.set({fontSize: Math.max(14, prefs.fontSize - 1)})}><Minus size={16} /></button><button title="增大字号" aria-label="增大字号" onClick={() => prefs.set({fontSize: Math.min(26, prefs.fontSize + 1)})}><Plus size={16} /></button><button title="阅读设置" aria-label="阅读设置" onClick={() => layout.set({settingsOpen: true})}><Settings2 size={17} /></button><button title="专注模式" aria-label="专注模式" aria-pressed={layout.focus} onClick={() => {setColorOpen(false); setFocusNoteId(null); layout.set({focus: true, settingsOpen: false, historyOpen: false});}}><Maximize2 size={18} /></button><AccountMenu user={user} onLogout={onLogout} /></div></header>}
     {importStatus && <div className="status-banner" role="status">{importStatus}<button aria-label="关闭提示" onClick={() => setImportStatus('')}><X size={14} /></button></div>}
-    <div className="reader-grid"><aside className={`left-panel ${layout.leftOpen ? 'open' : ''}`}><div className="panel-heading"><span>目录</span><button title="收起目录" onClick={() => layout.set({leftOpen: false})}><ChevronLeft size={16} /></button></div><nav>{paper.sections.filter(section => !section.tocHidden).map(section => <button key={section.id} className={`toc-item level-${section.level}`} onClick={() => navigateContent(section.id)}>{section.title}</button>)}</nav></aside>
-      {(!layout.leftOpen || layout.focus) && <div className="side-rail"><button title="目录" aria-label="目录" aria-pressed={layout.leftOpen} onClick={() => layout.set({leftOpen: !layout.leftOpen})}><List size={19} /></button></div>}
-      <main className={`reading-column ${splitView && serverId ? 'split-reading' : ''}`}>{splitView && serverId && <PdfPane paper={paper} serverId={serverId} annotations={annotations} scrollRef={pdfRef} style={annotationUI.markStyle} color={prefs.activeColor} noteEnabled={annotationUI.noteEnabled} onAnnotation={record => void addAnnotation(record)} onNotice={setImportStatus} />}{splitView && serverId && <PaneDivider rightPercent={splitWidth} onChange={setSplitWidth} />}{prefs.toolbarDock !== 'top' && <div className={`docked-tools docked-${prefs.toolbarDock}`}>{toolbar}</div>}<article ref={articleRef} className="reader-scroll" onMouseUp={onTextSelection} onPointerDown={onAreaStart} onPointerUp={onAreaEnd} onPointerCancel={() => {areaStart.current = null;}}><div className="paper-content">{translations.error && <p className="source-notice" role="alert">{translations.error}</p>}<DocumentRenderer translations={translations} document={paper} annotations={annotations} onReference={openReference} /></div></article><div className="reading-progress"><span style={{width: `${progress}%`}} /></div></main>
-      {(!layout.rightOpen || layout.focus) && <div className="side-rail right-side">{PANELS.map(panel => {const Icon = panel.id === 'references' ? BookOpen : panel.id === 'figures' ? Image : panel.id === 'tables' ? Table2 : StickyNote; return <button key={panel.id} title={panel.label} aria-label={panel.label} aria-pressed={layout.rightOpen && layout.rightPanel === panel.id} onClick={() => layout.set({rightOpen: !(layout.rightOpen && layout.rightPanel === panel.id), rightPanel: panel.id})}><Icon size={18} /></button>;})}</div>}
-      <aside className={`right-panel ${layout.rightOpen ? 'open' : ''}`}><div className="panel-tabs">{PANELS.map(panel => <button key={panel.id} className={layout.rightPanel === panel.id ? 'active' : ''} onClick={() => layout.set({rightPanel: panel.id})}>{panel.label}</button>)}<button className="panel-collapse" title="收起面板" aria-label="收起面板" onClick={() => layout.set({rightOpen: false})}><ChevronRight size={16} /></button></div><div className="panel-list">
+    {layout.focus && <FocusModeTools note={annotations.find(item => item.id === focusNoteId)}
+      onExit={() => {setColorOpen(false); setFocusNoteId(null); layout.set({focus: false});}}
+      onCloseNote={() => setFocusNoteId(null)}
+      onChangeNote={text => {const record = annotations.find(item => item.id === focusNoteId); if (record) updateNote(record, text);}}
+      onSaveNote={text => {
+        if (!focusNoteId || !serverId) return;
+        const timer = noteSyncTimers.current.get(focusNoteId);
+        if (timer) {clearTimeout(timer); noteSyncTimers.current.delete(focusNoteId); syncNote(focusNoteId, text, serverId);}
+      }}>{toolbar}</FocusModeTools>}
+    <div className="reader-grid"><aside hidden={layout.focus} className={`left-panel ${layout.leftOpen ? 'open' : ''}`}><div className="panel-heading"><span>目录</span><button title="收起目录" onClick={() => layout.set({leftOpen: false})}><ChevronLeft size={16} /></button></div><nav>{paper.sections.filter(section => !section.tocHidden).map(section => <button key={section.id} className={`toc-item level-${section.level}`} onClick={() => navigateContent(section.id)}>{section.title}</button>)}</nav></aside>
+      {(!layout.leftOpen && !layout.focus) && <div className="side-rail"><button title="目录" aria-label="目录" aria-pressed={layout.leftOpen} onClick={() => layout.set({leftOpen: !layout.leftOpen})}><List size={19} /></button></div>}
+      <main className={`reading-column ${showPdf ? 'split-reading' : ''}`}>{showPdf && <PdfPane paper={paper} serverId={serverId!} annotations={annotations} scrollRef={pdfRef} style={annotationUI.markStyle} color={prefs.activeColor} noteEnabled={annotationUI.noteEnabled} onAnnotation={record => void addAnnotation(record)} onNotice={setImportStatus} />}{showPdf && <PaneDivider rightPercent={splitWidth} onChange={setSplitWidth} />}{!layout.focus && prefs.toolbarDock !== 'top' && <div className={`docked-tools docked-${prefs.toolbarDock}`}>{toolbar}</div>}<article ref={articleRef} className="reader-scroll" onMouseUp={onTextSelection} onPointerDown={onAreaStart} onPointerUp={onAreaEnd} onPointerCancel={() => {areaStart.current = null;}}><div className="paper-content">{translations.error && <p className="source-notice" role="alert">{translations.error}</p>}<DocumentRenderer translations={translations} document={paper} annotations={annotations} onReference={openReference} /></div></article><div className="reading-progress"><span style={{width: `${progress}%`}} /></div></main>
+      {(!layout.rightOpen && !layout.focus) && <div className="side-rail right-side">{PANELS.map(panel => {const Icon = panel.id === 'references' ? BookOpen : panel.id === 'figures' ? Image : panel.id === 'tables' ? Table2 : StickyNote; return <button key={panel.id} title={panel.label} aria-label={panel.label} aria-pressed={layout.rightOpen && layout.rightPanel === panel.id} onClick={() => layout.set({rightOpen: !(layout.rightOpen && layout.rightPanel === panel.id), rightPanel: panel.id})}><Icon size={18} /></button>;})}</div>}
+      <aside hidden={layout.focus} className={`right-panel ${layout.rightOpen ? 'open' : ''}`}><div className="panel-tabs">{PANELS.map(panel => <button key={panel.id} className={layout.rightPanel === panel.id ? 'active' : ''} onClick={() => layout.set({rightPanel: panel.id})}>{panel.label}</button>)}<button className="panel-collapse" title="收起面板" aria-label="收起面板" onClick={() => layout.set({rightOpen: false})}><ChevronRight size={16} /></button></div><div className="panel-list">
         {layout.rightPanel === 'references' && (paper.references.length ? paper.references.map(ref => <div className="reference-card" id={`ref-${ref.id}`} key={ref.id}><small>[{ref.number}] {ref.authors}</small><strong>{ref.title}</strong>{referenceDetails(ref) && <span>{referenceDetails(ref)}</span>}{distinctReferencePreview(ref) && <p>{distinctReferencePreview(ref)}</p>}</div>) : <p className="empty-panel">暂无参考文献</p>)}
         {layout.rightPanel === 'figures' && (figuresInOrder.length ? figuresInOrder.map(item => <button className="asset-card" key={item.id} onClick={() => navigateContent(item.id)}>{item.src && <img src={item.src} alt="" />}<strong>{item.label || `Figure ${item.number}`}</strong><span>{item.caption}</span></button>) : <p className="empty-panel">暂无图片</p>)}
         {layout.rightPanel === 'tables' && (tablesInOrder.length ? tablesInOrder.map(item => <button className="asset-card" key={item.id} onClick={() => navigateContent(item.id)}><strong>{item.label || `Table ${item.number}`}</strong><span>{item.caption}</span></button>) : <p className="empty-panel">暂无表格</p>)}

@@ -214,7 +214,7 @@ class AccountStore:
 
     def list_documents(self, owner_id: str) -> list[dict[str, Any]]:
         with self.connect() as db:
-            return [dict(row) for row in db.execute("SELECT * FROM documents WHERE owner_id=? ORDER BY created_at DESC", (owner_id,))]
+            return [dict(row) for row in db.execute("""SELECT d.*, COALESCE((SELECT SUM(seconds) FROM reading_activity a WHERE a.document_id=d.id AND a.user_id=?),0) AS reading_seconds FROM documents d WHERE owner_id=? ORDER BY created_at DESC""", (owner_id, owner_id))]
 
     def find_document(self, owner_id: str, fingerprint: str) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -272,13 +272,14 @@ class AccountStore:
             return dict(row) if row else None
 
     def save_progress(self, user_id: str, document_id: str, percent: float, block_id: str | None,
-                      block_offset: float) -> None:
+                      block_offset: float, recorded_at: float | None = None) -> None:
         with self.connect() as db:
             db.execute("""INSERT INTO reading_progress(user_id,document_id,scroll_progress,block_id,block_offset,updated_at)
                    VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,document_id) DO UPDATE SET
                    scroll_progress=excluded.scroll_progress,block_id=excluded.block_id,
-                   block_offset=excluded.block_offset,updated_at=excluded.updated_at""",
-                   (user_id, document_id, percent, block_id, block_offset, time.time()))
+                   block_offset=excluded.block_offset,updated_at=excluded.updated_at
+                   WHERE reading_progress.updated_at <= excluded.updated_at""",
+                   (user_id, document_id, percent, block_id, block_offset, recorded_at if recorded_at is not None else time.time()))
 
     def annotations(self, document_id: str) -> list[dict[str, Any]]:
         with self.connect() as db:
