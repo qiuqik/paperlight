@@ -20,7 +20,7 @@ Docker Desktop 提供 Intel 和 Apple Silicon 两个安装版本；系统版本�
 
 1. 安装适合芯片的 Docker Desktop，并启动它。
 2. 下载或克隆本项目，在终端进入项目根目录。完整部署建议 Docker 虚拟机分配 10–12 GiB 内存、至少 4 个 CPU 核，磁盘预留 20–30 GB；这是资源预算建议，不是实测最低配置。
-3. 按 [README 的准备环境步骤](../README.md#deepseek-api-配置必备) 配置 DeepSeek API key，获得发表信息查询与公式辅助转写的完整体验；然后启动服务并创建管理员：
+3. 按 [README 的准备环境步骤](../README.md#deepseek-api-配置必备) 配置 DeepSeek API key，获得段落翻译、发表信息查询与公式辅助转写的完整体验；然后启动服务并创建管理员：
 
 ```sh
 docker compose up --build -d
@@ -82,7 +82,7 @@ docker compose exec parser python -m app.bootstrap_admin --username admin
 | RapidOCR 随包 ONNX 权重 | 31.75 MB 合计 | 当前 parser 自动选择 Torch；这些文件随包存在 | 检测 9.93 MB、方向 590 KB、识别 21.23 MB；不另算成正在使用的第二套 OCR |
 | GROBID CRF 模型目录 | 约 460 MB | 服务默认启动，`auto` 下按需调用 | 文献、作者、标题等结构提取；文件大小包含模型目录配套文件；历史调用约 39–342 秒，包含服务等待与文献信息整合 |
 | Docling CodeFormulaV2 | 权重 631 MB；含 tokenizer / 配置约 640 MB | **未启用**，本机历史缓存含有 | 当前 `do_formula_enrichment=False`；原公式以 PDF 裁图显示，不要求下载该模型；没有独立测速 |
-| DeepSeek 云端元数据 / 视觉转写 | 本地 0 MB | 仅配置 API key 时启用 | 发表信息查询、公式辅助转写；按服务商 API 计费，与本地正文解析分开 |
+| DeepSeek 云端翻译 / 元数据 / 视觉转写 | 本地 0 MB | 仅配置 API key 时启用 | 按需段落翻译、发表信息查询、公式辅助转写；按服务商 API 计费，与本地正文解析分开 |
 | 豆包云端视觉转写 | 本地 0 MB | 仅配置 key 和支持的视觉模型时启用 | 公式辅助转写；费用、模型与网络耗时依部署者选择 |
 
 默认核心 Docling 权重（Layout + Accurate + Torch OCR）合计约 **417 MB**；另外有随包 ONNX 文件、配置文件，以及镜像内的 GROBID 模型。不要据此认为完整程序只占 417 MB，运行库和镜像占用见下节。
@@ -164,7 +164,7 @@ docker compose --profile mineru up --build -d
 
 - 本地 CPU PDF 结构解析不调用付费 LLM API，也不要求购买显卡；这部分没有按篇 API 费用，仍有电费、存储和带宽成本。完整使用体验需要配置 DeepSeek，其辅助调用费用另计。
 - Docker Desktop 的个人、教育、非商业开源及满足条件的小企业用途可免费，其他商业场景可能需要订阅，见 [官方许可说明](https://docs.docker.com/subscription-billing/desktop-license/)。
-- 完整部署需配置 DeepSeek API，用于在导入 / 打开论文时执行元数据查询、公式辅助转写；豆包为另外支持的视觉转写服务。费用由实际模型、输入输出 token、搜索工具、重试和供应商价格决定，本文没有账单实测，不能承诺每篇固定价格。
+- 完整部署需配置 DeepSeek API，用于点击翻译时执行段落翻译，以及在导入 / 打开论文时执行元数据查询、公式辅助转写；豆包为另外支持的视觉转写服务。费用由实际模型、输入输出 token、搜索工具、重试和供应商价格决定，本文没有账单实测，不能承诺每篇固定价格。
 - API 预算可按“请求输入 token × 输入单价 + 输出 token × 输出单价 + 搜索 / 其他工具费”计算，并把重试计入。云端只提供辅助信息，阅读原 PDF / 本地解析不依赖它们。
 - 租服务器时，按上述 CPU、内存和磁盘预算询价；主机、备份、域名与外网流量是独立费用。本项目没有绑定云厂商，也没有可靠报价，故不写虚构月租。
 - 电费估算为“平均功率 W ÷ 1000 × 开机小时数 × 当地每 kWh 电价”。例如自行假设 60 W、每天 8 小时、30 天、0.6 元/kWh，结果是 8.64 元/月；**这不是 Paperlight 的实测功耗**，也不含整机购买成本。

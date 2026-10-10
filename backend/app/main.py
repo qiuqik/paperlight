@@ -34,6 +34,8 @@ from .normalizer import finalize_document_model
 from .pdf_pipeline import parse_pdf
 from .vision import configured_provider, transcribe_file
 from .publication import PublicationInfo, api_key as publication_api_key, lookup_publication
+from .translations import TranslationStore, translation_targets
+from pydantic import BaseModel, StrictBool
 
 APP_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("PAPERLIGHT_DATA_DIR", APP_DIR / "storage" / "documents")).resolve()
@@ -63,6 +65,7 @@ parse_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pdf-parse
 publication_executor = ThreadPoolExecutor(max_workers=2)
 publication_lock = Lock()
 publication_active: set[str] = set()
+TRANSLATIONS = TranslationStore()
 logger = logging.getLogger(__name__)
 ACCOUNTS = AccountStore(Path(os.environ.get("PAPERLIGHT_DB_PATH", DATA_DIR.parent / "paperlight.db")))
 CURRENT_USER: ContextVar[dict[str, Any] | None] = ContextVar("paperlight_user", default=None)
@@ -799,6 +802,52 @@ def get_document_model(document_id: str) -> DocumentModel:
         raise HTTPException(status_code=409, detail=state.error or "Document is not ready.")
     return state.document
 
+
+class TranslationRequest(BaseModel):
+    targetId: str | None = None
+    all: StrictBool = False
+
+
+class TranslationVisibility(BaseModel):
+    expanded: StrictBool
+    targetId: str | None = None
+
+
+def _translation_document(document_id: str) -> tuple[Path, dict[str, str]]:
+    record = _document_record(document_id)
+    if record['parse_status'] != 'ready':
+        raise HTTPException(status_code=409, detail='论文尚未解析完成。')
+    folder = _document_folder(document_id)
+    model = DocumentModel(**json.loads((folder / 'document.json').read_text(encoding='utf-8')))
+    if model.source != 'arxiv_html':
+        model = finalize_document_model(model, _annotation_block_ids(document_id), folder)
+    return folder, translation_targets(model.model_dump())
+
+
+@app.get('/api/documents/{document_id}/translations')
+def get_translations(document_id: str) -> dict:
+    folder, targets = _translation_document(document_id)
+    return TRANSLATIONS.read(folder, targets)
+
+
+@app.post('/api/documents/{document_id}/translations', status_code=202)
+def request_translations(document_id: str, body: TranslationRequest) -> dict:
+    folder, targets = _translation_document(document_id)
+    if body.all == bool(body.targetId):
+        raise HTTPException(status_code=422, detail='请选择一个段落或全部翻译。')
+    if body.targetId is not None and body.targetId not in targets:
+        raise HTTPException(status_code=404, detail='该段落不可翻译。')
+    if not publication_api_key():
+        raise HTTPException(status_code=503, detail='请先配置 DeepSeek API key。')
+    return TRANSLATIONS.request(folder, targets, body.targetId)
+
+
+@app.patch('/api/documents/{document_id}/translations')
+def update_translation_visibility(document_id: str, body: TranslationVisibility) -> dict:
+    folder, targets = _translation_document(document_id)
+    if body.targetId is not None and body.targetId not in targets:
+        raise HTTPException(status_code=404, detail='该段落不可翻译。')
+    return TRANSLATIONS.visibility(folder, targets, body.expanded, body.targetId)
 
 @app.get('/api/documents/{document_id}/publication')
 def get_publication(document_id: str) -> dict[str, Any]:

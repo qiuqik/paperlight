@@ -8,6 +8,13 @@ function blockFor(node: Node | null, root: HTMLElement): HTMLElement | null {
   return block && root.contains(block) ? block : null;
 }
 
+// Translations are siblings of source blocks; cross-block selections must also
+// exclude their controls and Chinese text from saved source quotations.
+function originalRangeText(range: Range): string {
+  const contents = range.cloneContents();
+  contents.querySelectorAll('[data-translation-ui]').forEach(element => element.remove());
+  return contents.textContent || '';
+}
 function textOffset(block: HTMLElement, node: Node, offset: number): number {
   const range = document.createRange();
   range.selectNodeContents(block);
@@ -22,7 +29,7 @@ export function captureAnchor(root: HTMLElement): TextAnchor | null {
   const startBlock = blockFor(range.startContainer, root);
   const endBlock = blockFor(range.endContainer, root);
   if (!startBlock || !endBlock) return null;
-  const quote = selection.toString().trim();
+  const quote = originalRangeText(range).trim();
   if (!quote) return null;
   const start = textOffset(startBlock, range.startContainer, range.startOffset);
   const end = textOffset(endBlock, range.endContainer, range.endOffset);
@@ -56,7 +63,7 @@ function rangeAt(startBlock: HTMLElement, startOffset: number, endBlock: HTMLEle
 }
 
 function sameQuote(range: Range, quote: string): boolean {
-  return normalizeQuote(range.toString()) === normalizeQuote(quote);
+  return normalizeQuote(originalRangeText(range)) === normalizeQuote(quote);
 }
 
 export function resolveAnchor(root: HTMLElement, anchor: TextAnchor): Range | null {
@@ -92,7 +99,7 @@ export function resolveAnchor(root: HTMLElement, anchor: TextAnchor): Range | nu
 type HighlightRegistry = {set: (key: string, value: unknown) => void; delete: (key: string) => void};
 export function renderTextHighlights(root: HTMLElement, annotations: Annotation[]): () => void {
   const registry = (CSS as unknown as {highlights?: HighlightRegistry}).highlights;
-  const HighlightClass = (window as unknown as {Highlight?: new (range: Range) => unknown}).Highlight;
+  const HighlightClass = (window as unknown as {Highlight?: new (...ranges: Range[]) => unknown}).Highlight;
   if (!registry || !HighlightClass) return () => {};
   const style = document.createElement('style');
   const keys: string[] = [];
@@ -102,7 +109,16 @@ export function renderTextHighlights(root: HTMLElement, annotations: Annotation[
     if (!range) continue;
     const key = `paperlight-${annotation.id.replace(/[^a-zA-Z0-9-]/g, '')}`;
     const color = /^#[0-9a-fA-F]{6}$/.test(annotation.color) ? annotation.color : '#f8d86a';
-    registry.set(key, new HighlightClass(range));
+    const sourceRanges = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]'))
+      .filter(block => range.intersectsNode(block))
+      .map(block => {
+        const part = document.createRange();
+        part.selectNodeContents(block);
+        if (block.contains(range.startContainer)) part.setStart(range.startContainer, range.startOffset);
+        if (block.contains(range.endContainer)) part.setEnd(range.endContainer, range.endOffset);
+        return part;
+      });
+    registry.set(key, new HighlightClass(...sourceRanges));
     style.textContent += (annotation.style || annotation.type) === 'underline'
       ? `::highlight(${key}){text-decoration:underline;text-decoration-color:${color};text-decoration-thickness:2px;background:transparent}`
       : `::highlight(${key}){background:${color}80;color:inherit}`;

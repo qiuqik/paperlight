@@ -1,10 +1,12 @@
 'use client';
-import {useEffect, useRef, useState} from 'react';
+import {Fragment, useEffect, useRef, useState} from 'react';
 import {createPortal} from 'react-dom';
 import katex from 'katex';
 import type {Annotation, Block, DocumentModel, InlineNode, PageGeometry, Section} from '@/lib/document';
 import {isTextAnchor} from '@/lib/document';
 import PaperIdentity from './PaperIdentity';
+import {ParagraphTranslation, TranslationContext} from './ParagraphTranslation';
+import type {TranslationController} from '@/lib/useDocumentTranslations';
 
 function renderedLatex(latex: string, displayMode: boolean) {
   let expression = latex.trim();
@@ -147,17 +149,17 @@ function SectionView({section, annotations, pages, onReference, pdfUrl, arxivHtm
       if (!prompt && block.type === 'paragraph' && block.continuesPrevious && group?.at(-1)?.type === 'paragraph') group.push(block);
       else groups.push([block]);
     }
-    return groups.map(group => group.length === 1
+    return groups.map(group => <Fragment key={group[0].id}>{group.length === 1
       ? <BlockView key={group[0].id} block={group[0]} annotations={annotations} pages={pages} onReference={onReference} pdfUrl={pdfUrl} prompt={prompt} />
-      : <p key={group[0].id} className="continued-paragraph">{group.map((block, index) => <span key={block.id}>{index > 0 && ' '}<BlockView block={block} annotations={annotations} pages={pages} onReference={onReference} pdfUrl={pdfUrl} inlineParagraph /></span>)}</p>);
+      : <p key={group[0].id} className="continued-paragraph">{group.map((block, index) => <span key={block.id}>{index > 0 && ' '}<BlockView block={block} annotations={annotations} pages={pages} onReference={onReference} pdfUrl={pdfUrl} inlineParagraph /></span>)}</p>}<ParagraphTranslation targetId={`block:${group[0].id}`} /></Fragment>);
   };
-  return <section id={section.id} className={section.type === 'abstract' ? 'abstract-section' : prompt ? 'prompt-section' : ''}>{renderBlocks(section.blocks.filter(block => block.beforeHeading))}{(!section.tocHidden || prompt) && <Heading>{section.title}</Heading>}{renderBlocks(section.blocks.filter(block => !block.beforeHeading))}</section>;
+  return <section id={section.id} className={section.type === 'abstract' ? 'abstract-section' : prompt ? 'prompt-section' : ''}>{renderBlocks(section.blocks.filter(block => block.beforeHeading))}{(!section.tocHidden || prompt) && <Fragment><Heading>{section.title}</Heading><ParagraphTranslation targetId={`section:${section.id}`} /></Fragment>}{renderBlocks(section.blocks.filter(block => !block.beforeHeading))}</section>;
 }
 
-export default function DocumentRenderer({document: paper, annotations, onReference}: {document: DocumentModel; annotations: Annotation[]; onReference: (id: string) => void}) {
+export default function DocumentRenderer({document: paper, annotations, onReference, translations}: {document: DocumentModel; annotations: Annotation[]; onReference: (id: string) => void; translations: TranslationController}) {
   const pdfUrl = paper.source && paper.source !== 'arxiv_html' ? `/api/parser/api/documents/${paper.id}/original.pdf` : undefined;
-  return <>
-    <header className="paper-header"><div className="eyebrow">{paper.arxivId ? `ARXIV · ${paper.arxivId}v${paper.arxivVersion} · ${paper.source === 'arxiv_html' ? '官方 HTML' : 'PDF 原文'}` : `PAPERLIGHT · ${paper.metadata.pageCount || '—'} PAGES`}</div><h1>{paper.metadata.title}</h1><PaperIdentity key={paper.id} paper={paper} />{paper.fallbackReason && <p className="source-notice">官方 HTML 不完整，已使用固定版本的 PDF。</p>}</header>
+  return <TranslationContext.Provider value={translations}>
+    <header className="paper-header"><div className="eyebrow">{paper.arxivId ? `ARXIV · ${paper.arxivId}v${paper.arxivVersion} · ${paper.source === 'arxiv_html' ? '官方 HTML' : 'PDF 原文'}` : `PAPERLIGHT · ${paper.metadata.pageCount || '—'} PAGES`}</div><h1>{paper.metadata.title}</h1><ParagraphTranslation targetId="title" /><PaperIdentity key={paper.id} paper={paper} />{paper.fallbackReason && <p className="source-notice">官方 HTML 不完整，已使用固定版本的 PDF。</p>}</header>
     {paper.sections.map(section => <SectionView key={section.id} section={section} annotations={annotations} pages={paper.pages || []} onReference={onReference} pdfUrl={pdfUrl} arxivHtml={paper.source === 'arxiv_html'} />)}
-  </>;
+  </TranslationContext.Provider>;
 }
